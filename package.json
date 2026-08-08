@@ -1,0 +1,46 @@
+{
+  "name": "agentic-password-injector",
+  "version": "0.1.0",
+  "description": "MCP server that logs an agent into a website by injecting the credential straight into the DOM over CDP, so the model never sees the secret.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Stephen Blatt",
+    "url": "https://github.com/sblattj"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sblattj/agentic-password-injector.git"
+  },
+  "homepage": "https://github.com/sblattj/agentic-password-injector#readme",
+  "bugs": "https://github.com/sblattj/agentic-password-injector/issues",
+  "keywords": [
+    "mcp",
+    "credentials",
+    "cdp",
+    "browser-automation",
+    "password",
+    "agentic",
+    "security",
+    "totp",
+    "keychain",
+    "bun"
+  ],
+  "comment": "bun-only by construction: bun:sqlite, bun:test, and direct .ts imports have no node equivalent, so there is no node engine range that would be true.",
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "scripts": {
+    "mcp": "bun run ./src/mcp.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "smoke": "bash ./test/install.smoke.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "5.7.3"
+  }
+}
