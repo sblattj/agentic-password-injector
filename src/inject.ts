@@ -34,12 +34,12 @@ export { VISIBLE_FN };
  * human's click does, crossing OPEN shadow roots.
  *
  * `document.querySelector` stops at a shadow boundary, so for a field inside an
- * open shadow root it finds only the HOST — Experian's `<atlas-input>`, Angular
- * Material, Salesforce Lightning Web Components. Focus then lands on the host,
- * `Input.insertText` goes wherever focus really is, and the tool either refuses
- * or types somewhere unintended. So: try the light DOM, then walk open shadow
- * roots breadth-first; and if what we land on is a host rather than a field,
- * descend to the first `input`/`textarea` inside it.
+ * open shadow root it finds only the HOST — a custom element such as
+ * `<atlas-input>`, Angular Material, Salesforce Lightning Web Components. Focus
+ * then lands on the host, `Input.insertText` goes wherever focus really is, and
+ * the tool either refuses or types somewhere unintended. So: try the light DOM,
+ * then walk open shadow roots breadth-first; and if what we land on is a host
+ * rather than a field, descend to the first `input`/`textarea` inside it.
  *
  * SECURITY: this is an INLINE expression, never a `window.__pierce` global.
  * Installing the resolver on the page hands the page the ability to redefine it
@@ -143,8 +143,8 @@ const FOCUS_AND_CLEAR =
  * `Input.insertText` fires native `beforeinput` and `input` but NO keyboard
  * events. A validation widget wired to `keyup` — plain jQuery/vanilla, still
  * everywhere — therefore never re-evaluates, and sits at "criteria not met"
- * against a DOM value that is perfectly correct. Observed on ID.me's password
- * form, 2026-08-26: all four strength criteria read invalid against a valid
+ * against a DOM value that is perfectly correct. Observed on a server-rendered
+ * password form: all four strength criteria read invalid against a valid
  * 24-character value that would have submitted fine.
  *
  * Opt-in, because synthesising key events is a capability rather than a

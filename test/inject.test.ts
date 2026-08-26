@@ -260,10 +260,10 @@ test("I5: detectLoginFields wires the hardened expression through, not a copy", 
 // ── Shadow-DOM piercing ──────────────────────────────────────────────────────
 //
 // `document.querySelector` stops at a shadow boundary, so a field inside an open
-// shadow root resolves to its HOST — Experian's <atlas-input>, Angular Material,
-// Salesforce LWC. Focus lands on the host, and `Input.insertText` goes wherever
-// focus really is. The expression under test is the shipped one, executed
-// against a shim, not a re-implementation.
+// shadow root resolves to its HOST — a custom element such as <atlas-input>,
+// Angular Material, Salesforce LWC. Focus lands on the host, and
+// `Input.insertText` goes wherever focus really is. The expression under test is
+// the shipped one, executed against a shim, not a re-implementation.
 
 import { PIERCE_FN, inspectField } from "../src/inject.ts";
 
@@ -324,7 +324,7 @@ test("PIERCE: a hit TWO shadow roots deep is found", () => {
 });
 
 test("PIERCE: landing on a HOST descends to the input inside it", () => {
-  // The realistic Experian shape: the selector names the custom element, and the
+  // The realistic custom-element shape: the selector names the element, and the
   // field the human means is the <input> in its shadow root.
   const inner = new SEl("input");
   const host = new SEl("atlas-input", { id: "ssn" });
@@ -410,8 +410,9 @@ test("CLEAR: emptying the field never sends the secret to the page early", async
 //
 // Input.insertText fires native beforeinput/input but NO keyboard events, so a
 // validator wired to keyup sits at "criteria not met" against a correct value
-// (ID.me's password form, 2026-08-26). Opt-in: synthesising key events makes the
-// page believe a human typed, which is a capability rather than a courtesy.
+// (a server-rendered password form with a keyup-driven strength meter). Opt-in:
+// synthesising key events makes the page believe a human typed, which is a
+// capability rather than a courtesy.
 
 const evented = (calls: Call[]) =>
   calls.filter((c) => String(c.params.functionDeclaration ?? "").includes("KeyboardEvent"));

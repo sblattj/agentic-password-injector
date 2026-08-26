@@ -61,7 +61,7 @@ import type { SecretEntry } from "../src/vault/keychain.ts";
 import type { FieldInfo } from "../src/tools.ts";
 
 const SSN = "123456789";
-const SECRET_ORIGIN = "https://www.experian.com";
+const SECRET_ORIGIN = "https://forms.example.com";
 
 interface SecretSpy { consent: number; typed: { sel: string; value: string }[]; probes: number }
 

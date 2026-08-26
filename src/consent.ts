@@ -67,8 +67,8 @@ export function safeSecretName(raw: string | undefined): string | null {
 }
 
 /**
- * "Type ssn-full into experian.com?" is a materially different question from
- * "log in to experian.com", so the secret's dialog names WHAT is being typed as
+ * "Type ssn-full into forms.example.com?" is a materially different question from
+ * "log in to forms.example.com", so the secret's dialog names WHAT is being typed as
  * well as where. The entry name is the only handle a human has on a value they
  * are never shown — without it, every secret on a site raises an identical
  * prompt and consent stops carrying information.

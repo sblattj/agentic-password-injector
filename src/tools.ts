@@ -448,7 +448,7 @@ export function chooseUsernameField(f: FieldInfo[]): string | null {
  * it would hand back the field control the caller was refused.
  *
  * Sole-candidate is the one rule an attacker cannot exploit in that direction:
- * adding an input creates AMBIGUITY, and ambiguity refuses. A real bureau form
+ * adding an input creates AMBIGUITY, and ambiguity refuses. A real identity form
  * has many text boxes and will therefore refuse — correctly. That is what
  * `sel=allow` is for, and setting it is a human's decision.
  */

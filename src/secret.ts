@@ -41,7 +41,7 @@ export function shape(value: string, format: SecretFormat): string {
   switch (format) {
     case "dashed": return `${digits.slice(0, 3)}-${digits.slice(3, 5)}-${digits.slice(5)}`;
     case "last4": return digits.slice(5);
-    // Segmented inputs: ChexSystems splits an SSN across three boxes, twice over.
+    // Segmented inputs: some forms split an SSN across three boxes, twice over.
     case "first3": return digits.slice(0, 3);
     case "mid2": return digits.slice(3, 5);
   }

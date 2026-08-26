@@ -4,7 +4,7 @@
 <atlas-outer id="outer"></atlas-outer>
 <div id="log"></div>
 <script>
-// One shadow root deep: the SSN box the bureaus actually render.
+// One shadow root deep: the kind of SSN box real identity forms render.
 class AtlasInner extends HTMLElement {
   constructor(){ super();
     const r = this.attachShadow({mode:'open'});
@@ -29,7 +29,7 @@ customElements.define('atlas-outer', AtlasOuter);
 customElements.define('closed-box', ClosedBox);
 document.body.appendChild(document.createElement('closed-box'));
 
-// A keyup-driven validator: exactly the ID.me shape. It NEVER sees insertText.
+// A keyup-driven validator: the real-world shape that breaks. It NEVER sees insertText.
 window.__keyups = 0;
 window.__changes = 0;
 addEventListener('keyup', () => { window.__keyups++; }, true);

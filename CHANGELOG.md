@@ -34,7 +34,7 @@ publish from CI with provenance.
 ## [0.2.0] - 2026-08-26
 
 Adds `fill_secret`: typing a **named, non-credential secret** — an SSN, a
-credit-freeze PIN, a date of birth, an account number — into a field, behind the
+freeze PIN, a date of birth, an account number — into a field, behind the
 same origin binding, consent dialog and pre-keystroke `loaderId` guard that a
 credential fill gets.
 

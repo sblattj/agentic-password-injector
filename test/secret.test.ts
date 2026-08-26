@@ -11,10 +11,10 @@ test("raw returns the stored value verbatim, whatever it looks like", () => {
 });
 
 test("the four field shapes seen in the wild", () => {
-  expect(shape(SSN, "dashed")).toBe("123-45-6789"); // Equifax
-  expect(shape(SSN, "last4")).toBe("6789");         // Experian, TransUnion
-  expect(shape(SSN, "first3")).toBe("123");         // ChexSystems, segmented
-  expect(shape(SSN, "mid2")).toBe("45");            // ChexSystems, segmented
+  expect(shape(SSN, "dashed")).toBe("123-45-6789"); // one box, dashes typed
+  expect(shape(SSN, "last4")).toBe("6789");         // "last four digits" box
+  expect(shape(SSN, "first3")).toBe("123");         // segmented, three boxes
+  expect(shape(SSN, "mid2")).toBe("45");            // segmented, three boxes
 });
 
 test("a stored value that is ALREADY dashed shapes identically", () => {

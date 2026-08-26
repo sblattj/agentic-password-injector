@@ -109,16 +109,16 @@ test("FIX6: a scheme-prefixed or path-bearing caller string is dropped, not echo
 
 // ── The named-secret dialog ──────────────────────────────────────────────────
 //
-// "Type ssn-full into experian.com?" is a materially different question from
-// "log in to experian.com". Without the entry name, every secret on a site
+// "Type ssn-full into forms.example.com?" is a materially different question from
+// "log in to forms.example.com". Without the entry name, every secret on a site
 // raises an identical prompt and the human's consent stops carrying information
 // about WHAT they just authorised.
 
 import { buildSecretDialogScript, confirmSecretInjection, safeSecretName } from "../src/consent.ts";
 
 test("the secret dialog names WHAT is typed and WHERE, and defaults to Deny", () => {
-  const s = buildSecretDialogScript("https://www.experian.com", "ssn-full");
-  expect(s).toContain("Type secret 'ssn-full' into www.experian.com?");
+  const s = buildSecretDialogScript("https://forms.example.com", "ssn-full");
+  expect(s).toContain("Type secret 'ssn-full' into forms.example.com?");
   expect(s).toContain('default button "Deny"');
   // The prose must not read as a login prompt — the server's own title is the
   // only place the word appears.
@@ -127,7 +127,7 @@ test("the secret dialog names WHAT is typed and WHERE, and defaults to Deny", ()
 });
 
 test("the secret dialog never shows the value, only the entry name", () => {
-  const s = buildSecretDialogScript("https://www.experian.com", "ssn-full");
+  const s = buildSecretDialogScript("https://forms.example.com", "ssn-full");
   expect(s).not.toContain("123456789");
   expect(s).not.toContain("*");
 });

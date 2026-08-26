@@ -28,16 +28,16 @@ test("parseComment returns empty when the entry has no comment", () => {
 // vault. The flags are strictly additive.
 
 test("parseComment reads sel/kind flags alongside the origin", () => {
-  expect(parseComment(icmt("https://www.experian.com sel=allow kind=text"))).toEqual({
-    origin: "https://www.experian.com",
+  expect(parseComment(icmt("https://forms.example.com sel=allow kind=text"))).toEqual({
+    origin: "https://forms.example.com",
     flags: { sel: "allow", kind: "text" },
   });
 });
 
 test("parseComment does not care about flag ORDER, or about extra whitespace", () => {
-  const a = parseComment(icmt("kind=text sel=allow https://www.experian.com"));
-  const b = parseComment(icmt("https://www.experian.com   kind=text\tsel=allow"));
-  expect(a).toEqual({ origin: "https://www.experian.com", flags: { sel: "allow", kind: "text" } });
+  const a = parseComment(icmt("kind=text sel=allow https://forms.example.com"));
+  const b = parseComment(icmt("https://forms.example.com   kind=text\tsel=allow"));
+  expect(a).toEqual({ origin: "https://forms.example.com", flags: { sel: "allow", kind: "text" } });
   expect(b).toEqual(a);
 });
 
@@ -181,12 +181,12 @@ test("keychainTotpSeed THROWS vault_locked on a denied keychain — never no_tot
 // ── Named secrets: keychainSecret ────────────────────────────────────────────
 
 const SECRET_ATTRS =
-  '"icmt"<blob>="https://www.experian.com sel=allow kind=text"\n"svce"<blob>="apinj:ssn-full"';
+  '"icmt"<blob>="https://forms.example.com sel=allow kind=text"\n"svce"<blob>="apinj:ssn-full"';
 
 test("keychainSecret returns the origin and the flags, and reads NO plaintext", async () => {
   const s = spyRun((a) => (a.includes("-w") ? "123456789\n" : SECRET_ATTRS));
   const e = await keychainSecret("ssn-full", { run: s.run });
-  expect(e?.origin).toBe("https://www.experian.com");
+  expect(e?.origin).toBe("https://forms.example.com");
   expect(e?.flags).toEqual({ sel: "allow", kind: "text" });
   expect(s.pwReads()).toBe(0); // I2: lazy, exactly like a credential
 });

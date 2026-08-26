@@ -41,8 +41,8 @@ const FLAG_TOKEN = /^([a-z][a-z0-9_-]*)=(.*)$/i;
 /**
  * The entry's comment attribute, split into the bound origin and any flags.
  *
- *   -j 'https://www.experian.com'                    → { origin, flags: {} }
- *   -j 'https://www.experian.com sel=allow kind=text' → { origin, flags: {…} }
+ *   -j 'https://forms.example.com'                    → { origin, flags: {} }
+ *   -j 'https://forms.example.com sel=allow kind=text' → { origin, flags: {…} }
  *
  * The bare-origin form is the one every existing entry uses and MUST keep
  * parsing exactly as before; the flags are additive. Order does not matter, and

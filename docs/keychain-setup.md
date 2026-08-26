@@ -85,7 +85,7 @@ unaffected by the rule above.
 
 ## Named secrets (non-credential values)
 
-An SSN, a credit-freeze PIN, a date of birth, an account number: a value that is
+An SSN, a freeze PIN, a date of birth, an account number: a value that is
 not a login and has no username. It lives in the **same** `apinj:<name>`
 namespace as a credential and is read by `fill_secret`.
 
@@ -93,7 +93,7 @@ namespace as a credential and is read by `fill_secret`.
 security add-generic-password \
   -s 'apinj:ssn-full' \
   -a "$USER" \
-  -j 'https://www.experian.com sel=allow kind=text' \
+  -j 'https://forms.example.com sel=allow kind=text' \
   -w
 ```
 
@@ -127,8 +127,8 @@ binding at all and is refused with `no_origin_binding`.
 Without `sel=allow`, auto-detection is deliberately strict: **one candidate field
 or refuse.** There is no naming heuristic and no focus tiebreak, unlike the OTP
 path — an SSN announces nothing about itself, does not expire in thirty seconds,
-and page script can focus whatever it likes. A real bureau form has a dozen text
-boxes and will therefore refuse with `ambiguous_secret_field`. That is what
+and page script can focus whatever it likes. A real identity form has a dozen
+text boxes and will therefore refuse with `ambiguous_secret_field`. That is what
 `sel=allow` is for.
 
 ### Formats
@@ -136,13 +136,13 @@ boxes and will therefore refuse with `ambiguous_secret_field`. That is what
 Real forms want the same nine digits five different ways. Shaping happens inside
 the server, after the vault read, so the caller never handles the value:
 
-| `format` | Sends | Seen at |
+| `format` | Sends | Field shape |
 | --- | --- | --- |
 | `raw` (default) | the stored value verbatim | generated passwords |
-| `dashed` | `123-45-6789` | Equifax |
-| `last4` | `6789` | Experian, TransUnion |
-| `first3` | `123` | ChexSystems (segmented boxes) |
-| `mid2` | `45` | ChexSystems (segmented boxes) |
+| `dashed` | `123-45-6789` | a single box that wants the dashes typed |
+| `last4` | `6789` | a "last four digits" confirmation box |
+| `first3` | `123` | a segmented input split across three boxes |
+| `mid2` | `45` | a segmented input split across three boxes |
 
 Every format except `raw` **asserts exactly nine digits and refuses rather than
 sending** (`format_mismatch`). Without that assertion, `last4` on a four-digit
@@ -155,16 +155,16 @@ security find-generic-password -s 'apinj:ssn-full'   # attributes only, no secre
 ```
 
 The comment appears as
-`"icmt"<blob>="https://www.experian.com sel=allow kind=text"`. If it shows
+`"icmt"<blob>="https://forms.example.com sel=allow kind=text"`. If it shows
 `<NULL>`, the entry has no binding and will be refused.
 
 ### One secret, several sites
 
-The origin binding is per entry, so a value needed on seven different sites
-needs seven entries — one per bound origin — holding the same secret:
+The origin binding is per entry, so a value needed on several different sites
+needs one entry per bound origin, each holding the same secret:
 
 ```sh
-for host in www.experian.com www.equifax.com www.transunion.com; do
+for host in forms.example.com records.example.net verify.example.org; do
   security add-generic-password -s "apinj:ssn-${host%%.*}" -a "$USER" \
     -j "https://$host sel=allow kind=text" -w
 done

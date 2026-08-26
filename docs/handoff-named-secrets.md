@@ -2,8 +2,8 @@
 
 **Status:** IMPLEMENTED, 2026-08-26. Kept as the design rationale for `fill_secret`; see the
 "What shipped" section at the end for where each item landed and what is still unproven.
-**Written:** 2026-08-26, from a real campaign that needed this and had to work around its absence.
-**Reference implementation ported FROM:** `~/.dotorg/per-res/credit/inject-secret.py` (git-crypt'd repo, ~230 lines, stdlib + `websockets`).
+**Written:** from real usage that hit this gap and had to work around it with a separate script.
+**Reference implementation ported FROM:** a single-purpose local script (`<private-repo>/inject-secret.py`, ~230 lines, stdlib + `websockets`).
 
 ## The gap in one sentence
 
@@ -14,11 +14,12 @@ session spends most of its time doing.
 
 ### What forced the workaround
 
-A credit-freeze campaign (2026-08-25 → 26) had to put one SSN into ~7 different bureau forms
-without it ever entering an agent transcript, a shell history, or a log. This server could not
-do it, so a single-purpose Python script was written alongside it. That script now duplicates —
-less safely — machinery this repo already has (CDP plumbing, Keychain reads, focus verification).
-The goal of this handoff is to fold the capability in, **without** dissolving the security model
+One secret — an SSN — had to be typed into many differently-shaped fields across several
+unrelated identity-verification sites, without it ever entering an agent transcript, a shell
+history, or a log. This server could not do it, so a single-purpose Python script was written
+alongside it. That script now duplicates — less safely — machinery this repo already has
+(CDP plumbing, Keychain reads, focus verification). The goal of this handoff is to fold the
+capability in, **without** dissolving the security model
 that makes this server different from the script.
 
 ## Why you cannot simply port the script
@@ -67,7 +68,7 @@ The origin binding stays mandatory and keeps its current meaning:
 security add-generic-password \
   -s 'apinj:ssn-full' -a "$USER" \
   -w '123456789' \
-  -j 'https://www.experian.com'
+  -j 'https://forms.example.com'
 ```
 
 Two new pieces of entry metadata are needed. The comment attribute (`icmt`) is already parsed by
@@ -75,7 +76,7 @@ Two new pieces of entry metadata are needed. The comment attribute (`icmt`) is a
 new lookup path:
 
 ```
--j 'https://www.experian.com sel=allow kind=text'
+-j 'https://forms.example.com sel=allow kind=text'
 ```
 
 - `sel=allow` — the entry permits a caller-supplied `selector`. **Default is deny.** Without it,
@@ -96,10 +97,10 @@ shapes, and making the caller do it means the secret passes through the model:
 | `format` | Output | Field seen in the wild |
 |---|---|---|
 | `raw` | stored value verbatim | generated passwords |
-| `dashed` | `XXX-XX-XXXX` | Equifax |
-| `last4` | last 4 digits | Experian, TransUnion |
-| `first3` | first 3 digits | ChexSystems (segmented boxes) |
-| `mid2` | middle 2 digits | ChexSystems |
+| `dashed` | `XXX-XX-XXXX` | a single box that wants the dashes typed |
+| `last4` | last 4 digits | a "last four digits" confirmation box |
+| `first3` | first 3 digits | a segmented input split across three boxes |
+| `mid2` | middle 2 digits | a segmented input split across three boxes |
 
 Keep the script's guard: every format except `raw` **asserts exactly 9 digits and exits rather
 than sending** if not. A `last4` shaper silently returning the tail of a 4-digit stored value
@@ -116,18 +117,19 @@ would send the whole secret.
   1. **Shadow-DOM piercing.** `resolveObjectId` uses bare `document.querySelector`, which finds
      only the *host* for a field inside an open shadow root. Port the script's `__pierce`: walk
      open shadow roots breadth-first, and if the hit is a host rather than an input, descend to
-     its first inner `input`/`textarea`. Confirmed needed on Experian's `<atlas-input>`, Angular
-     Material, and Salesforce Lightning Web Components.
+     its first inner `input`/`textarea`. Confirmed needed on a custom element such as
+     `<atlas-input>`, Angular Material, and Salesforce Lightning Web Components.
   2. **Post-insert event dispatch, opt-in.** `Input.insertText` fires native `beforeinput`/`input`
      but **no keyboard events**. Vanilla validation widgets that key off `keyup` therefore sit at
-     "Criteria not met" while the DOM value is perfectly correct — observed on ID.me's Rails
-     password form, 2026-08-26, where all four criteria read invalid against a valid 24-char
-     value. Add an optional post-insert `keydown/keypress/keyup/change` burst. Make it opt-in:
-     synthesising key events is a capability, not a default.
+     "Criteria not met" while the DOM value is perfectly correct — observed on a server-rendered
+     password form with a keyup-driven strength meter, where all four criteria read invalid
+     against a valid 24-char value. Add an optional post-insert
+     `keydown/keypress/keyup/change` burst. Make it opt-in: synthesising key events is a
+     capability, not a default.
 - **`src/tools.ts`** — register `fill_secret`. Reuse `decideGate`, `confirmInjection`, and the
   `guard` re-assertion verbatim. The consent dialog must name **what** is being typed (the entry
-  name) as well as the bound origin, because "type ssn-full into experian.com" is a materially
-  different consent than "log in to experian.com".
+  name) as well as the bound origin, because "type ssn-full into forms.example.com" is a materially
+  different consent than "log in to forms.example.com".
 
 ## Do not port the masking
 
@@ -157,7 +159,7 @@ Mirror the existing suite; every file below already exists.
 
 ## Field-proven gotchas worth encoding
 
-Each of these cost real debugging time in the campaign that motivated this work:
+Each of these cost real debugging time against live forms:
 
 1. **`Input.insertText` goes to the FOCUSED element, not the selector.** This repo already
    defends it (`FOCUS_CHECK`, I4). The script learned it the hard way: a generated password once
@@ -172,17 +174,18 @@ Each of these cost real debugging time in the campaign that motivated this work:
    exclusive and you will be tempted to drop the check.
 4. **A page can validate cosmetically and submit correctly, or vice versa.** Prove which before
    acting: check for framework state (`__reactFiber` and friends) — if there is none, the DOM value
-   is what posts and a red indicator is decoration. This distinction decided whether to submit a
-   form on both 2026-08-25 (LexisNexis DOB) and 2026-08-26 (ID.me password).
-5. **Never let a page read back a field holding a secret via an accessibility snapshot.** On
-   2026-08-25 a `take_snapshot` printed every input value on a filled form — SSN included — into
-   an agent transcript. The secret was protected on the way IN and leaked on the way OUT. If this
+   is what posts and a red indicator is decoration. This distinction decided whether to submit
+   both a date-of-birth form and a server-rendered password form.
+5. **Never let a page read back a field holding a secret via an accessibility snapshot.** A
+   `take_snapshot` printed every input value on a filled form — SSN included — into an agent
+   transcript. The secret was protected on the way IN and leaked on the way OUT. If this
    server ever grows a read-back, it inherits that hazard.
 
 ## Definition of done
 
-- An SSN stored once under `apinj:ssn-full` can be typed into all seven bureau forms with no
-  caller-side reshaping and no plaintext anywhere outside the Keychain and the page.
+- An SSN stored once under `apinj:ssn-full` can be typed into every identity form that asks for
+  it, in whatever shape each one wants, with no caller-side reshaping and no plaintext anywhere
+  outside the Keychain and the page.
 - `inject-secret.py` is deleted, not merely superseded.
 - Origin binding, consent, and the `guard`/focus guarantees hold on every `fill_secret` path,
   proven by `test/gate.test.ts` and `test/leak.test.ts`.
@@ -227,7 +230,7 @@ Implemented on `feat/fill-secret`. Every item above landed except where noted.
 4. **Auto-detect is sole-candidate, with no focus tiebreak.** `chooseOtpField`'s discipline was
    the stated model, but its focus fallback is safe only because a name regex ran first and an
    OTP expires in 30s. Neither holds for an SSN, and page focus is one line of attacker script.
-   The cost is that real bureau forms will refuse with `ambiguous_secret_field` — which is what
+   The cost is that real identity forms will refuse with `ambiguous_secret_field` — which is what
    `sel=allow` is for.
 
 5. **The field is re-inspected on BOTH paths** (`inspectField`). On the selector path it is the
@@ -240,7 +243,7 @@ Implemented on `feat/fill-secret`. Every item above landed except where noted.
    `fill_credential` too.
 
 7. **`events` is exposed on `fill_credential` and `login` as well.** The observation that
-   motivated it (2026-08-26) was a *password* form.
+   motivated it was a *password* form.
 
 8. **A sixth gotcha, found while implementing this one.** `bubbles:true` is NOT enough for a
    synthetic event on a field inside a shadow root: without `composed:true` it stops at the
@@ -260,13 +263,13 @@ Implemented on `feat/fill-secret`. Every item above landed except where noted.
 
 - ✅ Origin binding, consent and the `guard`/focus guarantees hold on every `fill_secret` path —
   `test/gate.test.ts` (36 cases) and `test/leak.test.ts` (16 branches × value/length/mask).
-- ⚠️ **Not field-verified against a bureau.** 305 unit tests pass, `tsc --noEmit` is clean, the
-  server boots over stdio, and `bun run verify:live` puts 26 assertions through a real Chrome
-  (piercing two shadow roots deep, refusing a closed one, clearing a pre-filled box, the deep
+- ⚠️ **Not field-verified against a real identity form.** 305 unit tests pass, `tsc --noEmit`
+  is clean, the server boots over stdio, and `bun run verify:live` puts 26 assertions through a
+  real Chrome (piercing two shadow roots deep, refusing a closed one, clearing a pre-filled box, the deep
   focus check, the composed-event burst, `focus_lost` on a disabled target). What is still
-  unproven is a real bureau form: no live site has been filled through `fill_secret`, and the
+  unproven is a real identity form: no live site has been filled through `fill_secret`, and the
   segmented-box formats in particular are ported logic that has never met a real segmented box.
   Do one real fill before trusting it.
 - ⏸️ **`inject-secret.py` is NOT deleted.** Deleting the working tool before the replacement has
-  typed a single character into a real form would leave the campaign with neither. Delete it
+  typed a single character into a real form would leave the operator with neither. Delete it
   after the first successful live `fill_secret`, not before.

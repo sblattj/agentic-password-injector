@@ -88,7 +88,7 @@ try {
 
   // ── the keyup gap, and the opt-in that closes it ──────────────────────────
   const keyupsAfterInsert = await evalv(`window.__keyups`);
-  check("insertText fires NO keyboard events (the ID.me failure)", keyupsAfterInsert === 0,
+  check("insertText fires NO keyboard events (the keyup-validator failure)", keyupsAfterInsert === 0,
     `keyups=${keyupsAfterInsert}`);
   await typeIntoField(send2, "#ssn", SENTINEL, undefined, { events: true });
   const k = await evalv(`window.__keyups`), c = await evalv(`window.__changes`);
