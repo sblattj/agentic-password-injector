@@ -11,7 +11,9 @@
 #       (publish.yml). A brand-new package name has no npm page yet, so it
 #       usually needs one manual `npm publish` (interactive `npm login` +
 #       2FA/OTP, run by a human in their own terminal) before the trusted
-#       publisher can be wired up at all.
+#       publisher can be wired up at all. CONFIRMED on v0.2.0 (2026-08-26): this
+#       step died with `npm error code ENEEDAUTH` on the first-ever tag, and
+#       0.2.0 was published by hand — which is why it carries no provenance.
 #   (c) A LOCAL `npm publish` can never produce a provenance attestation — it
 #       requires the CI/OIDC environment (the `id-token: write` permission
 #       below, consumed by npm's OIDC exchange during `npm publish
@@ -72,8 +74,14 @@ jobs:
         if: steps.version-check.outputs.skip != 'true'
         run: npm publish --provenance --access public
 
+      # `!cancelled()` rather than `success()`: a failed npm publish must not also
+      # swallow the GitHub Release. v0.2.0 hit exactly that — the package did not
+      # exist on npm yet, so no trusted publisher could be registered, so publish
+      # died with ENEEDAUTH and this step never ran. The release then had to be
+      # created by hand. The two are independent artifacts and should fail
+      # independently. `!cancelled()` still skips on a deliberate cancellation.
       - name: Create GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

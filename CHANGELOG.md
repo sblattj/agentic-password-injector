@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-08-26
+
+Packaging and release-plumbing only. No functional change to the server: 0.2.1
+and 0.2.0 behave identically.
+
+### Fixed
+
+- **The published tarball shipped the whole repo.** With no `files` field and no
+  `.npmignore`, npm fell back to `.gitignore` and included the entire test suite
+  (46 kB of `tools.test.ts` alone), `bun.lock`, the design handoff, and
+  `.github/workflows/publish.yml`. A `files` allowlist cuts the tarball from 39
+  files / 341 kB unpacked to 19 / 130 kB, keeping all of `src/`, the Keychain
+  setup guide the README links to, and the changelog.
+- **A failed `npm publish` also swallowed the GitHub Release.** The release step
+  was gated behind the publish step succeeding, so when v0.2.0 died with
+  `ENEEDAUTH` — the package did not exist on npm yet, so no trusted publisher
+  could be registered against it — the release had to be created by hand. The
+  two are independent artifacts and now fail independently (`!cancelled()`).
+
+### Note
+
+0.2.0 on npm carries **no provenance attestation**: it was published manually to
+bootstrap the package page, and provenance requires the CI OIDC environment. Once
+a trusted publisher is registered for this repo + `publish.yml`, later tags
+publish from CI with provenance.
+
 ## [0.2.0] - 2026-08-26
 
 Adds `fill_secret`: typing a **named, non-credential secret** — an SSN, a
