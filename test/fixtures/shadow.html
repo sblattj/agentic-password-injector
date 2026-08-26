@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>apinj pierce check</title>
+<body>
+<input id="light" type="text" value="prefilled-light">
+<atlas-outer id="outer"></atlas-outer>
+<div id="log"></div>
+<script>
+// One shadow root deep: the SSN box the bureaus actually render.
+class AtlasInner extends HTMLElement {
+  constructor(){ super();
+    const r = this.attachShadow({mode:'open'});
+    r.innerHTML = '<input id="ssn" type="text" value="stale-value">';
+  }
+}
+// Two deep, to prove the walk is breadth-first and not one-level.
+class AtlasOuter extends HTMLElement {
+  constructor(){ super();
+    const r = this.attachShadow({mode:'open'});
+    r.innerHTML = '<atlas-inner id="inner"></atlas-inner><input id="pw" type="password">';
+  }
+}
+class ClosedBox extends HTMLElement {
+  constructor(){ super();
+    const r = this.attachShadow({mode:'closed'});
+    r.innerHTML = '<input id="unreachable" type="text">';
+  }
+}
+customElements.define('atlas-inner', AtlasInner);
+customElements.define('atlas-outer', AtlasOuter);
+customElements.define('closed-box', ClosedBox);
+document.body.appendChild(document.createElement('closed-box'));
+
+// A keyup-driven validator: exactly the ID.me shape. It NEVER sees insertText.
+window.__keyups = 0;
+window.__changes = 0;
+addEventListener('keyup', () => { window.__keyups++; }, true);
+addEventListener('change', () => { window.__changes++; }, true);
+</script>
+</body>

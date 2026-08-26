@@ -22,7 +22,7 @@ This is the part that matters, so every claim below points at the code that impl
 
 The secret is fetched from the vault and dispatched at the page as real keystrokes (`Input.insertText`) entirely inside the MCP process. Every tool's return type is `FillResult = { filled: boolean; submitted?: boolean; reason?: string }` (`src/tools.ts`) — there is no field a password could travel in, and no reveal tool exists. Failure `reason`s come from a **fixed vocabulary** (`origin_mismatch`, `user_denied`, `vault_locked`, …); raw error text never escapes a tool, because a decrypt/Keychain error message can carry unaudited state (`secretFailReason` / `vaultFailReason` in `src/tools.ts`).
 
-`test/leak.test.ts` is the load-bearing test: it drives `login` and `fill_totp` through *every* return branch with a sentinel secret and asserts the sentinel appears in no return value and no thrown message — and then asserts the sentinel *did* reach `typeIntoField`, so the absence-assertions are provably non-vacuous rather than testing nothing.
+`test/leak.test.ts` is the load-bearing test: it drives `login`, `fill_totp` and `fill_secret` through *every* return branch with a sentinel secret and asserts the sentinel — and, for `fill_secret`, its length and any mask of it — appears in no return value and no thrown message — and then asserts the sentinel *did* reach `typeIntoField`, so the absence-assertions are provably non-vacuous rather than testing nothing.
 
 The plaintext's lifetime is also bounded on purpose: it is zeroed in a `finally` the moment the keystrokes are out (`login` / `fillCredential` in `src/tools.ts`), and the CDP dispatcher clears each command's timeout on settle, so a stale timer closure cannot keep the `Input.insertText` params — i.e. the password — reachable for the timeout window (`createDispatcher`, `src/cdp.ts`).
 
@@ -68,6 +68,22 @@ Field choice is a pure, unit-tested function over what the page reports, not a `
 - **Ambiguity refuses.** Two visible password inputs → `ambiguous_password_field`, not a coin flip reported as `filled: true` (`chooseFields`, `src/inject.ts`). An unlabelled username box is accepted only when it is the sole candidate (`chooseUsernameField`, `src/tools.ts`).
 - **Focus is verified**, in its own round-trip immediately before inserting: `Input.insertText` lands wherever focus *is*, and `.focus()` can be silently undone by an `onfocus` handler or an async focus-steal. Failure throws `focus_lost` and nothing is typed (`FOCUS_CHECK`, `src/inject.ts`). The check is boolean-only — it never reads `value`, so it is not a reveal path.
 - **OTP fields are matched conservatively.** A bare "code" is deliberately *not* matched: "Zip code" and "Promo code" routinely precede the real OTP box, and typing a live one-time code into one is a disclosure (`OTP_RE`, `src/tools.ts`). Probe stamps are unique per call, so a stale attribute from a previous probe cannot make a later selector resolve to the wrong element.
+- **Shadow roots are pierced, but nothing is installed on the page.** A field inside an open shadow root (`<atlas-input>`, Angular Material, Salesforce LWC) is invisible to `document.querySelector`, which finds only the host — so focus lands on the host and the keystroke goes elsewhere. `PIERCE_FN` (`src/inject.ts`) walks open shadow roots breadth-first as an **inline expression**, never a cached `window.__pierce` global: a page that pre-defines such a global would choose the target of every later injection. The focus check walks `shadowRoot.activeElement` down to the same element before comparing, so piercing and focus-verification are not mutually exclusive.
+
+### 9. Named secrets are a narrower capability, not a selector API
+
+`fill_secret` reaches fields the credential tools deliberately will not — an SSN box, a freeze PIN, a segmented date of birth. The obvious way to build it is to accept a CSS selector, which is what a single-purpose script does safely *because a human typed the selector*. This server assumes the caller may be steered by page content, so handing it selector control would give back exactly the power the ambiguity refusal in §8 exists to withhold: name a visible attacker-controlled `input`, and the SSN renders on screen.
+
+So the reach is granted **per entry, at storage time, by a human**, in the Keychain comment attribute (`parseComment`, `src/vault/keychain.ts`):
+
+- `sel=allow` — this entry permits a caller-supplied `selector`. **Default deny.**
+- `kind=text` — this secret may land in a non-password input. **Default deny**, which is the protection `chooseFields` gets for free by keying on `type === "password"`.
+
+Everything else is unchanged: the origin binding is mandatory and fails closed, one consent dialog per injection (naming the *entry* as well as the bound origin, because "type ssn-full into experian.com" is a different question from "log in to experian.com"), and the `loaderId` guard re-asserted immediately before the keystroke. Resolution is **Keychain-only** — routing through the credential chain would let an Arc row whose username matched the name substitute a saved login, from a backend that carries no flags.
+
+Without `sel=allow`, auto-detection is one candidate or refuse (`chooseSecretField`, `src/tools.ts`). There is no naming heuristic and no focus tiebreak, unlike the OTP path: an SSN announces nothing about itself, does not expire in thirty seconds, and page script can focus whatever it likes. Adding an input creates ambiguity, and ambiguity refuses — so script on the matched origin can *deny* a fill but cannot redirect one.
+
+Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so the caller never handles the value, and each **asserts exactly nine digits and refuses rather than sending** (`shape`, `src/secret.ts`) — without that, `last4` on a four-digit stored value returns the whole value. Nothing is read back: the return stays `{filled, reason?}`, with no length and no mask. The reference implementation's masking was wrong twice in one day for the same reason — secrecy is a property of the **format**, not the length, and a naive `len >= 8` test printed the last two digits of an 11-character dashed SSN.
 
 ---
 
@@ -84,22 +100,27 @@ Field choice is a pure, unit-tested function over what the page reports, not a `
 
 ---
 
-## The four tools
+## The five tools
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
 | `list_credentials` | `domain` (required), `name?` | `{ credentials: [{ origin, username, backend, has_totp }], reason? }` |
-| `fill_credential` | `tabId`, `domain`, `field: "username" \| "password"` (required), `name?` | `{ filled, reason? }` |
-| `login` | `tabId`, `domain` (required), `name?`, `submit?: boolean` | `{ filled, submitted, reason? }` |
+| `fill_credential` | `tabId`, `domain`, `field: "username" \| "password"` (required), `name?`, `events?` | `{ filled, reason? }` |
+| `login` | `tabId`, `domain` (required), `name?`, `submit?: boolean`, `events?` | `{ filled, submitted, reason? }` |
 | `fill_totp` | `tabId`, `domain` (required), `name?`, `selector?` | `{ filled, reason? }` |
+| `fill_secret` | `tabId`, `name` (required), `selector?`, `format?`, `events?` | `{ filled, reason? }` |
 
 - `tabId` is a **CDP target id** — always explicit, never "the active tab".
 - `domain` is the domain of the *saved credential* (`github.com`), and must be a registrable domain.
 - `name` selects a specific credential when several share a domain: an Arc row whose username is `name`, or the Keychain entry stored under `apinj:<name>`. A supplied `name` that matches nothing is a miss, never a substitution — returning a different account would show the wrong username in the dialog.
 - `login` is one origin check and **one** dialog for username + password (+ optional submit). `fill_credential` exists for identifier-first flows (Google, Microsoft) where the password field isn't on the page yet.
 - `fill_totp` reads the seed, computes the code, types it, and drops both. Neither is ever returned.
+- `fill_secret` types a **named non-credential secret** — an SSN, a freeze PIN, a date of birth, an account number. It takes no `domain`: the Keychain entry `apinj:<name>` *is* the lookup key, and its stored origin is the binding. See [named secrets](#9-named-secrets-are-a-narrower-capability-not-a-selector-api) below and `docs/keychain-setup.md`.
+- `events` fires a synthetic `keydown`/`keypress`/`keyup`/`change` burst after the insert. `Input.insertText` fires native `beforeinput`/`input` but **no keyboard events**, so a validator wired to `keyup` shows "criteria not met" against a value that is actually correct. Opt-in, because synthesising key events makes the page believe a human typed.
 
 Common `reason` codes: `origin_mismatch`, `user_denied`, `navigated_during_consent`, `no_origin_binding`, `not_found`, `vault_locked`, `vault_error`, `focus_lost`, `ambiguous_password_field`, `no_password_field`, `no_username_field`, `no_otp_field`, `no_totp`, `bad_domain`, `tab_unavailable`.
+
+`fill_secret` adds: `name_required`, `bad_name`, `bad_format`, `format_mismatch`, `selector_not_allowed`, `kind_not_allowed`, `field_not_visible`, `no_secret_field`, `ambiguous_secret_field`.
 
 ---
 
@@ -194,13 +215,23 @@ Be clear-eyed about it: the commercial products are more polished, cross-platfor
 
 ---
 
-## HARD RULE for the calling agent
+## HARD RULES for the calling agent
 
-> **Never take a DOM snapshot, accessibility snapshot, screenshot, or `innerText` dump of a credentials page between the fill and the submit.**
+> **1. Never take a DOM snapshot, accessibility snapshot, screenshot, or `innerText` dump of a page you just filled, between the fill and the submit.**
 
-The whole design keeps the secret out of your context — and then a single `take_snapshot` of the page you just filled can put it right back in, because a password input's value (or a site's "show password" state) can surface in a snapshot or a screenshot. Fill, submit, *then* look. If you need to verify, verify the post-login page.
+The whole design keeps the secret out of your context — and then a single `take_snapshot` of the page you just filled can put it right back in, because a password input's value (or a site's "show password" state) can surface in a snapshot or a screenshot. Fill, submit, *then* look. If you need to verify, verify the post-submit page.
+
+This is not hypothetical, and it is worse for `fill_secret` than for a password: on 2026-08-25 an accessibility snapshot of a filled identity form printed **every input value, SSN included**, into an agent transcript. The secret was protected on the way in and leaked on the way out. A `type="text"` SSN box — which is exactly what `kind=text` exists to allow — has none of the masking a password input gets.
 
 Related: `login({submit: true})` exists precisely so the fill-and-submit sequence needs no intermediate look.
+
+> **2. A red validation indicator is not evidence the value is wrong.**
+
+A page can validate cosmetically and submit correctly, or the reverse. Before acting on what the form *looks* like, establish which: if the field has no framework state attached (`__reactFiber` and friends), the DOM value is what posts and the indicator is decoration. If a validator is keyed to `keyup`, `Input.insertText` never fires one — pass `events: true` rather than concluding the fill failed and typing it again.
+
+> **3. A refusal is the tool working.**
+
+`ambiguous_secret_field`, `kind_not_allowed`, `selector_not_allowed` and `focus_lost` all mean *nothing was typed*. None of them is fixed by retrying with different arguments — `selector_not_allowed` and `kind_not_allowed` are fixed only by the human changing the stored entry, and `ambiguous_secret_field` means the page has more than one candidate field and the server will not guess between them. Report the refusal; do not work around it.
 
 ## Coordinating with cdp-toolkit
 
@@ -214,11 +245,21 @@ This works well alongside a general browser-driving MCP such as [cdp-toolkit](ht
 ## Development
 
 ```sh
-bun test              # unit + leak tests
+bun test              # unit + leak tests, no browser needed
 bun run typecheck     # tsc --noEmit
 bun run smoke         # entrypoint starts; pass TOML=<servers.toml> to also check registration
 bun run mcp           # run the server on stdio
+
+# Drives the real serialized page-world expressions against a REAL browser:
+# piercing two shadow roots deep, the deep focus check, field clearing, and the
+# composed-event burst. No secret involved; it opens its own tab and closes it.
+CDP_BASE=http://127.0.0.1:9222 bun run verify:live
 ```
+
+`test/live-check.ts` earns its place: the unit suites drive those expressions against a shim,
+and a shim cannot model shadow-DOM event retargeting. The post-insert burst shipped once with
+`bubbles:true` alone — which reaches no listener outside the shadow root, i.e. it did nothing on
+exactly the pages piercing exists for — with every unit test green. Only the live check caught it.
 
 ## License
 

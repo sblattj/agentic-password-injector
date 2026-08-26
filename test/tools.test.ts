@@ -44,11 +44,13 @@ function mkDeps(over: Partial<Deps> & { origin?: string; page?: Input[]; live?: 
       cred: { origin: "https://x.com", username: "alice", getSecret: () => PASSWORD },
       backend: "arc",
     }),
+    resolveSecret: async () => ({ origin: "https://x.com", flags: {}, getSecret: () => PASSWORD }),
     resolveTarget: async () => ({ wsUrl: "ws://stub", url: "https://x.com/login" }),
     withConn: async (_ws, fn) => fn(send),
     getOrigin: async () => { spy.originReads++; return over.live?.origin ? over.live.origin() : origin; },
     getLoaderId: async () => { spy.loaderReads++; return over.live?.loader ? over.live.loader() : "LOADER-1"; },
     confirmInjection: async () => { spy.consentCalls++; return true; },
+    confirmSecret: async () => { spy.consentCalls++; return true; },
     detectLoginFields: async () => ({ user: "#u", pass: "#p" }),
     typeIntoField: async (_s, sel, value) => { spy.typed.push({ sel, value }); },
     // Models the real probe: stamps each candidate with a per-call unique value.
@@ -59,6 +61,7 @@ function mkDeps(over: Partial<Deps> & { origin?: string; page?: Input[]; live?: 
         label: "", autocomplete: "", focused: false, ...x,
       })) as FieldInfo[];
     },
+    inspectField: async () => ({ type: "password", visible: true }),
     totpCode: () => "123456",
     keychainHasTotp: () => true,
     keychainTotpSeed: () => SEED,
@@ -851,9 +854,9 @@ test("login reports submitted from the page's own answer", async () => {
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
-test("all four tools are registered with schemas", () => {
+test("all five tools are registered with schemas", () => {
   const names = MANIFEST.map((m) => m.name).sort();
-  expect(names).toEqual(["fill_credential", "fill_totp", "list_credentials", "login"]);
+  expect(names).toEqual(["fill_credential", "fill_secret", "fill_totp", "list_credentials", "login"]);
   for (const m of MANIFEST) {
     expect(typeof TOOLS[m.name]).toBe("function");
     expect(m.inputSchema.type).toBe("object");
@@ -861,13 +864,23 @@ test("all four tools are registered with schemas", () => {
   }
 });
 
-test("tab tools require tabId and domain", () => {
+test("credential tools require tabId and domain", () => {
   for (const n of ["fill_credential", "login", "fill_totp"]) {
     const req = MANIFEST.find((m) => m.name === n)!.inputSchema.required as string[];
     expect(req).toContain("tabId");
     expect(req).toContain("domain");
   }
   expect(MANIFEST.find((m) => m.name === "fill_credential")!.inputSchema.required).toContain("field");
+});
+
+test("fill_secret is keyed by NAME, not by domain — the entry is the binding", () => {
+  // `domain` is the credential chain's lookup key and would be a second,
+  // caller-chosen string in a tool whose whole binding comes from one entry.
+  const s = MANIFEST.find((m) => m.name === "fill_secret")!.inputSchema as {
+    properties: Record<string, unknown>; required: string[];
+  };
+  expect(s.required.sort()).toEqual(["name", "tabId"]);
+  expect(Object.keys(s.properties)).not.toContain("domain");
 });
 
 // ── FIX 5 (cross-seat): the has_totp probe is a SECOND vault call that can throw ─

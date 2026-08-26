@@ -1,8 +1,9 @@
 # Handoff — named secrets (non-credential injection)
 
-**Status:** design handoff, not implemented.
+**Status:** IMPLEMENTED, 2026-08-26. Kept as the design rationale for `fill_secret`; see the
+"What shipped" section at the end for where each item landed and what is still unproven.
 **Written:** 2026-08-26, from a real campaign that needed this and had to work around its absence.
-**Reference implementation to port FROM:** `~/.dotorg/per-res/credit/inject-secret.py` (git-crypt'd repo, ~230 lines, stdlib + `websockets`).
+**Reference implementation ported FROM:** `~/.dotorg/per-res/credit/inject-secret.py` (git-crypt'd repo, ~230 lines, stdlib + `websockets`).
 
 ## The gap in one sentence
 
@@ -185,3 +186,87 @@ Each of these cost real debugging time in the campaign that motivated this work:
 - `inject-secret.py` is deleted, not merely superseded.
 - Origin binding, consent, and the `guard`/focus guarantees hold on every `fill_secret` path,
   proven by `test/gate.test.ts` and `test/leak.test.ts`.
+
+---
+
+## What shipped
+
+Implemented on `feat/fill-secret`. Every item above landed except where noted.
+
+| Handoff item | Where it landed |
+| --- | --- |
+| `fill_secret({tabId, name, selector?, format?})` | `fillSecret`, `src/tools.ts` — plus `events?`, below |
+| `sel=allow` / `kind=text`, default deny | `parseComment` → `{origin, flags}`, `src/vault/keychain.ts` |
+| `parseComment` keeps the bare-origin form | `test/keychain.test.ts`, first two cases unchanged in meaning |
+| `keychainSecret(name)`, lazy plaintext read | `src/vault/keychain.ts`; asserted by a `-w`-read counter |
+| `shape()` with the nine-digit assertion | `src/secret.ts`, `test/secret.test.ts` |
+| Shadow-DOM piercing | `PIERCE_FN`, `src/inject.ts` |
+| Opt-in post-insert event burst | `TypeOptions.events`, `src/inject.ts` |
+| Reuse `decideGate` / consent / `guard` verbatim | `gatedOnOrigin`, `src/tools.ts` — extracted from `gated`, shared by both |
+| Consent names the entry as well as the origin | `buildSecretDialogScript`, `src/consent.ts` |
+| No masking, no read-back | return stays `{filled, reason?}`; asserted per branch in `test/leak.test.ts` |
+| The five test-plan files | all extended; `test/secret.test.ts` added |
+
+### Decisions taken that the handoff left open
+
+1. **Keychain-only resolution.** The handoff cited `resolveCredentialWith` rule 1, but that
+   function tries Arc FIRST and returns an Arc row whose `username === name`. For a secret that
+   is a substitution: a saved login's password, from a backend that carries no `sel`/`kind`
+   flags. `fillSecret` calls `resolveSecret` (→ `keychainSecret`) directly and never touches the
+   credential chain. Proven by `test/gate.test.ts:"VAULT: fill_secret resolves KEYCHAIN-ONLY"`.
+
+2. **No `domain` argument.** The handoff's signature omitted it and that is right: the entry is
+   the lookup key and its stored origin is the binding, so a `domain` would only add a second
+   caller-chosen string with nothing to bind. This also removes it from the consent dialog.
+
+3. **`PIERCE_FN` is inline, not `window.__pierce`.** The script cached the resolver on the page
+   behind `if (window.__pierce) return true`. A script on the matched origin that pre-defines
+   that global then chooses the target of every subsequent injection — the exact field control
+   `sel=deny` withholds. Deliberately not ported.
+
+4. **Auto-detect is sole-candidate, with no focus tiebreak.** `chooseOtpField`'s discipline was
+   the stated model, but its focus fallback is safe only because a name regex ran first and an
+   OTP expires in 30s. Neither holds for an SSN, and page focus is one line of attacker script.
+   The cost is that real bureau forms will refuse with `ambiguous_secret_field` — which is what
+   `sel=allow` is for.
+
+5. **The field is re-inspected on BOTH paths** (`inspectField`). On the selector path it is the
+   only place `kind` can be enforced at all; it also refuses an invisible target, which the
+   focus check alone does not (an `opacity:0` input takes focus fine).
+
+6. **`typeIntoField` now clears the field**, folded into the existing focus round-trip so the
+   guard→insert window does not grow. Not in the handoff, but `Input.insertText` inserts at the
+   caret rather than replacing — the same shape as gotcha 1's Auth0 incident, and a live bug for
+   `fill_credential` too.
+
+7. **`events` is exposed on `fill_credential` and `login` as well.** The observation that
+   motivated it (2026-08-26) was a *password* form.
+
+8. **A sixth gotcha, found while implementing this one.** `bubbles:true` is NOT enough for a
+   synthetic event on a field inside a shadow root: without `composed:true` it stops at the
+   shadow boundary and reaches no document-level listener at all. The burst therefore did
+   nothing on exactly the pages the piercing work exists for — while every unit test stayed
+   green, because a shim cannot model event retargeting. `composed` now mirrors the UA,
+   verified against real `Input.dispatchKeyEvent` traffic in Chrome 151: key events and `input`
+   are composed, `change` is not (and is deliberately left that way — a synthetic event that
+   propagates differently from the real one is its own lie).
+
+   That is also why `test/live-check.ts` now exists: 26 assertions driving the real serialized
+   expressions against a real browser with two nested open shadow roots and a closed one.
+   `bun run verify:live` with a CDP port open. It is not part of `bun test`, which needs no
+   browser — but it is the only thing in the repo that could have caught this.
+
+### Definition of done: two of three
+
+- ✅ Origin binding, consent and the `guard`/focus guarantees hold on every `fill_secret` path —
+  `test/gate.test.ts` (36 cases) and `test/leak.test.ts` (16 branches × value/length/mask).
+- ⚠️ **Not field-verified against a bureau.** 305 unit tests pass, `tsc --noEmit` is clean, the
+  server boots over stdio, and `bun run verify:live` puts 26 assertions through a real Chrome
+  (piercing two shadow roots deep, refusing a closed one, clearing a pre-filled box, the deep
+  focus check, the composed-event burst, `focus_lost` on a disabled target). What is still
+  unproven is a real bureau form: no live site has been filled through `fill_secret`, and the
+  segmented-box formats in particular are ported logic that has never met a real segmented box.
+  Do one real fill before trusting it.
+- ⏸️ **`inject-secret.py` is NOT deleted.** Deleting the working tool before the replacement has
+  typed a single character into a real form would leave the campaign with neither. Delete it
+  after the first successful live `fill_secret`, not before.

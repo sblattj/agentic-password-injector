@@ -5,6 +5,63 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`fill_secret`** — types a NAMED, non-credential secret (SSN, freeze PIN,
+  date of birth, account number) into a field, behind the same origin binding,
+  consent dialog and pre-keystroke `loaderId` guard as a credential fill. It
+  takes no `domain`: the Keychain entry `apinj:<name>` is the lookup key and its
+  stored origin is the binding, and it resolves Keychain-only so an Arc row
+  cannot substitute a saved login for the named secret. Returns
+  `{ filled, reason? }` — never the value, its length, or a mask of it.
+- **Per-entry capability flags** in the Keychain comment attribute, set by a
+  human at storage time and defaulting to deny: `sel=allow` permits a
+  caller-supplied CSS selector, `kind=text` permits a non-password target field.
+  Without them, `fill_secret` must auto-detect (one candidate or refuse) and may
+  only type into a `type="password"` input. The bare-origin comment form is
+  unchanged. Unknown flags parse and are ignored.
+- **Format shaping** (`src/secret.ts`): `raw`, `dashed`, `last4`, `first3`,
+  `mid2`, so the same nine digits reach five differently-shaped fields without
+  the value passing through the caller. Every format but `raw` asserts exactly
+  nine digits and refuses rather than sending.
+- **Shadow-DOM piercing** (`PIERCE_FN`, `src/inject.ts`): selectors now resolve
+  inputs inside open shadow roots (`<atlas-input>`, Angular Material, Salesforce
+  LWC), which a plain `document.querySelector` sees only the host of. It is an
+  inline expression rather than a `window.__pierce` global, so a page cannot
+  redefine the resolver and choose the target of a later injection.
+- **`events` option** on `fill_credential`, `login` and `fill_secret`: an opt-in
+  `keydown`/`keypress`/`keyup`/`change` burst after the insert.
+  `Input.insertText` fires native `beforeinput`/`input` but no keyboard events,
+  so a validator wired to `keyup` reports "criteria not met" against a perfectly
+  good value.
+
+### Changed
+
+- The focus verification now walks `shadowRoot.activeElement` before comparing
+  identity. `document.activeElement` reports the shadow HOST, so the flat check
+  was false for every field piercing reached — piercing and focus-verification
+  would otherwise have been mutually exclusive.
+- `typeIntoField` now empties the target field (through the native `value`
+  setter, plus an `input` event so React observes it) in the same round-trip as
+  the focus call. `Input.insertText` inserts at the caret rather than replacing,
+  so a pre-filled box previously had the secret concatenated onto its contents
+  while the tool reported `filled: true`.
+- `parseComment` returns `{ origin, flags }` instead of a bare origin string.
+- Synthetic events now set `composed` to match the UA (key events and `input`
+  yes, `change` no). `bubbles: true` alone does not cross a shadow boundary, so
+  the burst reached no document-level listener on the very pages the piercing
+  work exists for.
+
+### Testing
+
+- `test/live-check.ts` (`bun run verify:live`): 26 assertions driving the real
+  serialized page-world expressions against a real browser over CDP — two nested
+  open shadow roots, a closed one, a pre-filled field, a disabled target. Not
+  part of `bun test`, which needs no browser. It is what caught the `composed`
+  bug that every shim-based test missed.
+
 ## [0.1.0] - 2026-08-07
 
 Initial release.

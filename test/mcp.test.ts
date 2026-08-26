@@ -9,9 +9,9 @@
 // The old test here asserted `Array.isArray(MANIFEST)`, which passes on an empty
 // manifest, i.e. on total registration failure.
 import { expect, test } from "bun:test";
-import { MANIFEST, TOOLS, fillCredential, fillTotp, listCredentials, login } from "../src/tools.ts";
+import { MANIFEST, TOOLS, fillCredential, fillSecret, fillTotp, listCredentials, login } from "../src/tools.ts";
 
-const EXPECTED = ["list_credentials", "fill_credential", "login", "fill_totp"];
+const EXPECTED = ["list_credentials", "fill_credential", "login", "fill_totp", "fill_secret"];
 
 /**
  * What each tool's HANDLER actually reads out of `args`, transcribed from the
@@ -22,15 +22,18 @@ const EXPECTED = ["list_credentials", "fill_credential", "login", "fill_totp"];
 const CONTRACT: Record<string, { required: string[]; optional: string[] }> = {
   // listCredentials reads: domain, name
   list_credentials: { required: ["domain"], optional: ["name"] },
-  // fillCredential reads: field + gated(tabId, domain, name)
-  fill_credential: { required: ["tabId", "domain", "field"], optional: ["name"] },
-  // login reads: submit + gated(tabId, domain, name)
-  login: { required: ["tabId", "domain"], optional: ["name", "submit"] },
+  // fillCredential reads: field, events + gated(tabId, domain, name)
+  fill_credential: { required: ["tabId", "domain", "field"], optional: ["name", "events"] },
+  // login reads: submit, events + gated(tabId, domain, name)
+  login: { required: ["tabId", "domain"], optional: ["name", "submit", "events"] },
   // fillTotp reads: selector, domain, name + gated(tabId, domain, name)
   fill_totp: { required: ["tabId", "domain"], optional: ["name", "selector"] },
+  // fillSecret reads: tabId, name, selector, format, events — and NO domain: the
+  // Keychain entry is the lookup key and its stored origin is the binding.
+  fill_secret: { required: ["tabId", "name"], optional: ["selector", "format", "events"] },
 };
 
-test("MANIFEST names, TOOLS keys and the four shipped tools are the SAME set", () => {
+test("MANIFEST names, TOOLS keys and the five shipped tools are the SAME set", () => {
   const manifestNames = MANIFEST.map((t) => t.name);
   // No duplicates: a second `register("login", …)` would silently shadow the
   // handler in TOOLS while leaving two entries in the manifest.
@@ -82,6 +85,20 @@ test("the registered handler is the exported implementation, not a stub", async 
   expect(await TOOLS.login({ domain: "x.com" })).toEqual({ filled: false, reason: "tab_unavailable" });
   expect(await TOOLS.fill_totp({ tabId: "T" })).toEqual(await fillTotp({ tabId: "T" }));
   expect(await TOOLS.fill_totp({ tabId: "T" })).toEqual({ filled: false, reason: "domain_required" });
+  expect(await TOOLS.fill_secret({ tabId: "T" })).toEqual(await fillSecret({ tabId: "T" }));
+  expect(await TOOLS.fill_secret({ tabId: "T" })).toEqual({ filled: false, reason: "name_required" });
+  expect(await TOOLS.fill_secret({ tabId: "T", name: "not a name" })).toEqual({ filled: false, reason: "bad_name" });
+});
+
+test("fill_secret's schema tells the model what it may NOT choose", () => {
+  // The description is the only thing a calling model reads before choosing
+  // arguments, and the two flags are the whole security story of this tool.
+  const t = MANIFEST.find((m) => m.name === "fill_secret")!;
+  expect(t.description).toContain("sel=allow");
+  expect(t.description).toContain("kind=text");
+  const props = (t.inputSchema as { properties: Record<string, { description: string; enum?: string[] }> }).properties;
+  expect(props.selector.description).toContain("sel=allow");
+  expect(props.format.enum).toEqual(["raw", "dashed", "last4", "first3", "mid2"]);
 });
 
 // ── The live server ──────────────────────────────────────────────────────────
@@ -125,7 +142,7 @@ const INIT = {
 };
 const INITED = { jsonrpc: "2.0", method: "notifications/initialized" };
 
-test("src/mcp.ts serves the four tools over a real stdio session", async () => {
+test("src/mcp.ts serves the five tools over a real stdio session", async () => {
   const msgs = await rpc([INIT, INITED, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }]);
   const init = msgs.find((m) => m.id === 1);
   expect(init?.result?.serverInfo?.name).toBe("agentic-password-injector");

@@ -34,7 +34,8 @@
     "mcp": "bun run ./src/mcp.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "smoke": "bash ./test/install.smoke.sh"
+    "smoke": "bash ./test/install.smoke.sh",
+    "verify:live": "bun run ./test/live-check.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"

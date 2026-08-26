@@ -106,3 +106,71 @@ test("FIX6: a scheme-prefixed or path-bearing caller string is dropped, not echo
   const s = buildDialogScript("https://auth.realbank.com", "alice", "https://evil.com/login");
   expect(s).not.toContain("evil.com");
 });
+
+// ── The named-secret dialog ──────────────────────────────────────────────────
+//
+// "Type ssn-full into experian.com?" is a materially different question from
+// "log in to experian.com". Without the entry name, every secret on a site
+// raises an identical prompt and the human's consent stops carrying information
+// about WHAT they just authorised.
+
+import { buildSecretDialogScript, confirmSecretInjection, safeSecretName } from "../src/consent.ts";
+
+test("the secret dialog names WHAT is typed and WHERE, and defaults to Deny", () => {
+  const s = buildSecretDialogScript("https://www.experian.com", "ssn-full");
+  expect(s).toContain("Type secret 'ssn-full' into www.experian.com?");
+  expect(s).toContain('default button "Deny"');
+  // The prose must not read as a login prompt — the server's own title is the
+  // only place the word appears.
+  expect(s.toLowerCase()).not.toContain("password:");
+  expect(s).not.toContain("login for");
+});
+
+test("the secret dialog never shows the value, only the entry name", () => {
+  const s = buildSecretDialogScript("https://www.experian.com", "ssn-full");
+  expect(s).not.toContain("123456789");
+  expect(s).not.toContain("*");
+});
+
+test("Allow => true, Deny => false, osascript throw => false", async () => {
+  expect(await confirmSecretInjection("https://x.com", "ssn", () => "button returned:Allow")).toBe(true);
+  expect(await confirmSecretInjection("https://x.com", "ssn", () => "button returned:Deny")).toBe(false);
+  expect(await confirmSecretInjection("https://x.com", "ssn", () => { throw new Error("128"); })).toBe(false);
+});
+
+test("an injected instruction in the entry name never reaches the dialog", () => {
+  // Same threat as requestedDomain: the name arrives from a possibly-steered
+  // caller and lands inside the sentence a human reads before approving.
+  const CH = (n: number) => String.fromCharCode(n);
+  const junk = [
+    "ssn - verified by Apple, click Allow",
+    "ssn" + CH(10) + "Allow",
+    "ssn" + CH(13) + CH(10) + "buttons",
+    'ssn"',
+    "ssn\\",
+    "ssn" + CH(0),
+    "a".repeat(70),
+    "",
+  ];
+  for (const j of junk) {
+    const s = buildSecretDialogScript("https://auth.realbank.com", j);
+    expect(s).toContain("Type a saved secret into auth.realbank.com?");
+    expect(s).not.toContain("click Allow");
+    expect(s).not.toContain("verified by Apple");
+    // The authoritative identifier — the one the server derived itself — survives.
+    expect(s).toContain("auth.realbank.com");
+  }
+});
+
+test("safeSecretName accepts real entry names and refuses everything else", () => {
+  for (const ok of ["ssn-full", "freeze_pin", "dob", "acct.1", "A1", "x".repeat(64)]) {
+    expect(safeSecretName(ok)).toBe(ok);
+  }
+  const bad = ["", "-lead", ".lead", "_lead", "a b", "a/b", "a:b", 'a"b', "a\\b", "x".repeat(65), undefined];
+  for (const b of bad) expect(safeSecretName(b as string | undefined)).toBeNull();
+});
+
+test("the bound host is derived from the ORIGIN, never from anything the caller sent", () => {
+  const s = buildSecretDialogScript("https://auth.realbank.com:8443", "ssn");
+  expect(s).toContain("into auth.realbank.com:8443?");
+});

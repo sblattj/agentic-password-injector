@@ -1,12 +1,13 @@
 import { CdpError, getLoaderId, getOrigin, resolveTarget, withConn, type Send } from "./cdp.ts";
-import { confirmInjection } from "./consent.ts";
+import { confirmInjection, confirmSecretInjection } from "./consent.ts";
 import { PUBLIC_SUFFIXES } from "./domain.ts";
 import { decideGate } from "./gate.ts";
-import { VISIBLE_FN, detectLoginFields, typeIntoField } from "./inject.ts";
+import { VISIBLE_FN, detectLoginFields, inspectField, typeIntoField, type TypeOptions } from "./inject.ts";
 import { originMatches } from "./origin.ts";
+import { SECRET_FORMATS, isSecretFormat, shape, type SecretFormat } from "./secret.ts";
 import { totpCode } from "./totp.ts";
 import { resolveCredential, type Resolved } from "./vault/index.ts";
-import { keychainHasTotp, keychainTotpSeed } from "./vault/keychain.ts";
+import { keychainHasTotp, keychainSecret, keychainTotpSeed, type SecretEntry } from "./vault/keychain.ts";
 import type { Cred } from "./vault/arc.ts";
 
 export interface ToolSchema { name: string; description: string; inputSchema: Record<string, unknown>; }
@@ -23,12 +24,18 @@ export interface Deps {
   getOrigin: (send: Send) => Promise<string>;
   /** Browser-side identity of the CURRENT document load — the anti-TOCTOU token. */
   getLoaderId: (send: Send) => Promise<string>;
+  /** Keychain-only, by NAME. A named secret must never resolve through Arc — see `fillSecret`. */
+  resolveSecret: (name: string) => Promise<SecretEntry | null>;
   /** Prompts with the credential's BOUND origin; the caller domain is context only. */
   confirmInjection: (boundOrigin: string, username: string, requestedDomain: string) => Promise<boolean>;
+  /** Prompts with the BOUND origin and the entry name — what is typed, and where. */
+  confirmSecret: (boundOrigin: string, secretName: string) => Promise<boolean>;
   detectLoginFields: (send: Send) => Promise<{ user?: string; pass?: string; ambiguous?: boolean }>;
   /** `guard` is re-asserted INSIDE, immediately before the keystroke (M3). */
-  typeIntoField: (send: Send, selector: string, value: string, guard?: Guard) => Promise<void>;
-  probeFields: (send: Send, attr: string, token: string) => Promise<FieldInfo[]>;
+  typeIntoField: (send: Send, selector: string, value: string, guard?: Guard, opts?: TypeOptions) => Promise<void>;
+  probeFields: (send: Send, attr: string, token: string, opts?: ProbeOptions) => Promise<FieldInfo[]>;
+  /** The resolved field's type and visibility. Never its value. */
+  inspectField: (send: Send, selector: string) => Promise<{ type: string; visible: boolean } | null>;
   totpCode: (seed: string) => string;
   keychainHasTotp: (name: string) => boolean;
   keychainTotpSeed: (name: string) => string | null;
@@ -36,14 +43,17 @@ export interface Deps {
 
 export const REAL_DEPS: Deps = {
   resolveCredential,
+  resolveSecret: keychainSecret,
   resolveTarget,
   withConn,
   getOrigin,
   getLoaderId,
   confirmInjection: (origin, u, requested) => confirmInjection(origin, u, requested),
+  confirmSecret: (origin, name) => confirmSecretInjection(origin, name),
   detectLoginFields,
   typeIntoField,
   probeFields,
+  inspectField,
   totpCode: (seed) => totpCode(seed),
   keychainHasTotp,
   keychainTotpSeed,
@@ -196,6 +206,30 @@ async function gated(
   const savedOrigin = savedOriginFor(cred);
   if (!savedOrigin) return fail("no_origin_binding");
 
+  // The human authorises the BOUND origin — the same value the gate enforces.
+  return gatedOnOrigin(
+    d, tabId, savedOrigin,
+    () => d.confirmInjection(savedOrigin, cred.username, domain),
+    (send, guard) => run(send, cred, guard),
+  );
+}
+
+/**
+ * Everything after "which secret" is settled: connect, origin-check, consent,
+ * gate, and hand `run` a guard that re-asserts before every keystroke.
+ *
+ * Split out of `gated` so a NAMED SECRET gets these guarantees verbatim rather
+ * than in a second, subtly-different copy. What differs between a credential and
+ * a secret is entirely upstream of here — which vault answers, what the dialog
+ * says, which field is legal — and none of that belongs in the TOCTOU path.
+ */
+async function gatedOnOrigin(
+  d: Deps,
+  tabId: string,
+  savedOrigin: string,
+  consent: () => Promise<boolean>,
+  run: (send: Send, guard: Guard) => Promise<FillResult>,
+): Promise<FillResult> {
   let target: { wsUrl: string };
   try { target = await d.resolveTarget(tabId); } catch { return fail("tab_unavailable"); }
 
@@ -234,8 +268,7 @@ async function gated(
         }
       };
 
-      // The human authorises the BOUND origin — the same value the gate enforces.
-      const allow = await d.confirmInjection(savedOrigin, cred.username, domain);
+      const allow = await consent();
       const g = decideGate({ tabOrigin, savedOrigin, allow });
       if (!g.ok) return fail(g.reason);
 
@@ -244,7 +277,7 @@ async function gated(
       // ones inside `run`.
       try { await guard(); } catch (e) { return fail((e as GateAbort).reason); }
 
-      return await run(send, cred, guard);
+      return await run(send, guard);
     });
   } catch (e) {
     // Nothing past the gate should throw, but a socket death mid-flight must not
@@ -308,6 +341,19 @@ export interface FieldInfo {
 
 export const OTP_ATTR = "data-apinj-otp";
 export const USER_ATTR = "data-apinj-user";
+export const SECRET_ATTR = "data-apinj-secret";
+
+/**
+ * Both defaults are the narrow, existing behaviour. `fill_credential` and
+ * `fill_totp` keep exactly the candidate set they had: widening it would change
+ * which pages they call AMBIGUOUS, and their ambiguity refusals are load-bearing.
+ */
+export interface ProbeOptions {
+  /** Also enumerate inputs inside open shadow roots (see `PIERCE_FN`). */
+  deep?: boolean;
+  /** Include `type="password"` inputs among the candidates. */
+  includePassword?: boolean;
+}
 
 // A stamp value must be UNIQUE PER CALL. A shared literal (`="1"`) leaves the
 // previous call's attribute on the DOM, so a later probe's selector resolves to
@@ -316,23 +362,40 @@ export const USER_ATTR = "data-apinj-user";
 let stampSeq = 0;
 export function nextToken(kind: string): string { return `${kind}${++stampSeq}`; }
 
-export function probeExpr(attr: string, token: string): string {
+export function probeExpr(attr: string, token: string, opts: ProbeOptions = {}): string {
   const a = JSON.stringify(attr), t = JSON.stringify(token);
-  return `(()=>{document.querySelectorAll('['+${a}+']').forEach(e=>e.removeAttribute(${a}));` +
+  // The roots to enumerate. Shallow is `[document]` and issues no `'*'` query at
+  // all, so the shallow expression is byte-for-byte the shape it always was.
+  const roots = opts.deep
+    ? `(()=>{const rs=[document];for(let i=0;i<rs.length;i++){let all=[];` +
+      `try{all=[...rs[i].querySelectorAll('*')]}catch(_){}` +
+      `for(const e of all)if(e.shadowRoot)rs.push(e.shadowRoot)}return rs})()`
+    : `[document]`;
+  // A password box is excluded by default because the two tools that probe want
+  // a NON-password field; `fill_secret` needs them, since a secret whose entry
+  // does not say `kind=text` may only ever land in one.
+  const typeFilter = opts.includePassword ? `e.type!=='hidden'` : `e.type!=='password'&&e.type!=='hidden'`;
+  // `deepActive` matches the deep-activeElement walk in inject.ts's FOCUS_CHECK:
+  // with an open shadow root `document.activeElement` is the HOST, so a flat
+  // comparison reports `focused:false` for the very field the user is typing in.
+  const deepActive = `(()=>{let x=document.activeElement;` +
+    `while(x&&x.shadowRoot&&x.shadowRoot.activeElement)x=x.shadowRoot.activeElement;return x})()`;
+  return `(()=>{const rts=${roots};` +
+    `rts.forEach(r=>{try{r.querySelectorAll('['+${a}+']').forEach(e=>e.removeAttribute(${a}))}catch(_){}});` +
     // Same honest visibility test as the password path: `offsetParent` alone lets
     // an opacity:0 / 0x0 decoy earlier in DOM order win, and this probe feeds the
-    // username and the live OTP code.
-    `const vis=${VISIBLE_FN};` +
-    `const els=[...document.querySelectorAll('input')].filter(e=>vis(e)&&e.type!=='password'&&e.type!=='hidden');` +
+    // username, the live OTP code and now a named secret.
+    `const vis=${VISIBLE_FN};const act=${deepActive};` +
+    `const els=rts.flatMap(r=>[...r.querySelectorAll('input')]).filter(e=>vis(e)&&${typeFilter});` +
     `return els.map((e,i)=>{const v=${t}+'-'+i;e.setAttribute(${a},v);` +
     `return {sel:'['+${a}+'=\"'+v+'\"]',type:e.type||'text',name:e.name||'',id:e.id||'',` +
     `placeholder:e.placeholder||'',label:e.getAttribute('aria-label')||'',` +
-    `autocomplete:e.autocomplete||'',focused:e===document.activeElement}})})()`;
+    `autocomplete:e.autocomplete||'',focused:e===act}})})()`;
 }
 
-export async function probeFields(send: Send, attr: string, token: string): Promise<FieldInfo[]> {
+export async function probeFields(send: Send, attr: string, token: string, opts: ProbeOptions = {}): Promise<FieldInfo[]> {
   const r = await send<{ result: { value?: FieldInfo[] } }>("Runtime.evaluate", {
-    expression: probeExpr(attr, token),
+    expression: probeExpr(attr, token, opts),
     returnByValue: true,
   });
   return r?.result?.value ?? [];
@@ -371,11 +434,43 @@ export function chooseUsernameField(f: FieldInfo[]): string | null {
   return typed.length === 1 ? typed[0].sel : null;
 }
 
+/**
+ * Which field a NAMED SECRET may be auto-detected into. Sole candidate, or
+ * refuse.
+ *
+ * Unlike `chooseOtpField` there is deliberately NO naming heuristic and NO
+ * focus tiebreak. An OTP box announces itself (`autocomplete="one-time-code"`,
+ * "verification code") and the code it holds expires in thirty seconds. An SSN
+ * announces nothing, and does not expire — the cost of guessing wrong is the
+ * value rendered in a visible box on a page the human trusts, which is precisely
+ * what the default `sel=deny` exists to prevent. Focus is worse than useless
+ * here: it is one line of attacker JavaScript on the matched origin, so honouring
+ * it would hand back the field control the caller was refused.
+ *
+ * Sole-candidate is the one rule an attacker cannot exploit in that direction:
+ * adding an input creates AMBIGUITY, and ambiguity refuses. A real bureau form
+ * has many text boxes and will therefore refuse — correctly. That is what
+ * `sel=allow` is for, and setting it is a human's decision.
+ */
+export function chooseSecretField(
+  f: FieldInfo[],
+  opts: { kindText: boolean },
+): { sel?: string; ambiguous?: boolean } {
+  // `f` is already visible-only and non-hidden. Without `kind=text` a secret may
+  // land in a password box and nowhere else — the same protection `chooseFields`
+  // gets for free by keying on `type === "password"`.
+  const cands = opts.kindText ? f : f.filter((x) => x.type === "password");
+  if (cands.length === 0) return {};
+  if (cands.length > 1) return { ambiguous: true };
+  return { sel: cands[0].sel };
+}
+
 // ── fill_credential ──────────────────────────────────────────────────────────
 export async function fillCredential(args: unknown, d: Deps = REAL_DEPS): Promise<FillResult> {
-  const a = (args ?? {}) as { field?: unknown };
+  const a = (args ?? {}) as { field?: unknown; events?: unknown };
   const field = a.field === "username" || a.field === "password" ? a.field : null;
   if (!field) return fail("bad_field");
+  const events = Boolean(a.events);
 
   return gated(d, (args ?? {}) as any, async (send, cred, guard) => {
     const fields = await d.detectLoginFields(send);
@@ -390,7 +485,7 @@ export async function fillCredential(args: unknown, d: Deps = REAL_DEPS): Promis
       if (!sel) sel = chooseUsernameField(await d.probeFields(send, USER_ATTR, nextToken("user")));
       if (!sel) return fail("no_username_field");
       await guard();
-      await d.typeIntoField(send, sel, cred.username, guard);
+      await d.typeIntoField(send, sel, cred.username, guard, { events });
       return { filled: true };
     }
 
@@ -400,7 +495,7 @@ export async function fillCredential(args: unknown, d: Deps = REAL_DEPS): Promis
     try { secret = cred.getSecret(); } catch (e) { return fail(secretFailReason(e)); }
     try {
       await guard();
-      await d.typeIntoField(send, fields.pass, secret, guard);
+      await d.typeIntoField(send, fields.pass, secret, guard, { events });
     } finally { secret = ""; }
     return { filled: true };
   });
@@ -415,6 +510,7 @@ const SUBMIT_EXPR =
 /** One origin check, ONE consent dialog, then username + password + optional submit. */
 export async function login(args: unknown, d: Deps = REAL_DEPS): Promise<FillResult> {
   const submit = Boolean((args as { submit?: unknown } | null)?.submit);
+  const events = Boolean((args as { events?: unknown } | null)?.events);
   return gated(d, (args ?? {}) as any, async (send, cred, guard) => {
     const fields = await d.detectLoginFields(send);
     if (fields.ambiguous) return fail("ambiguous_password_field");
@@ -427,10 +523,10 @@ export async function login(args: unknown, d: Deps = REAL_DEPS): Promise<FillRes
       // is itself a round-trip the page can navigate under.
       if (fields.user) {
         await guard();
-        await d.typeIntoField(send, fields.user, cred.username, guard);
+        await d.typeIntoField(send, fields.user, cred.username, guard, { events });
       }
       await guard();
-      await d.typeIntoField(send, fields.pass, secret, guard);
+      await d.typeIntoField(send, fields.pass, secret, guard, { events });
     } finally {
       secret = ""; // drop the plaintext the moment the keystrokes are out
     }
@@ -477,11 +573,137 @@ export async function fillTotp(args: unknown, d: Deps = REAL_DEPS): Promise<Fill
   });
 }
 
+// ── fill_secret ──────────────────────────────────────────────────────────────
+//
+// A named secret is not a credential: an SSN, a freeze PIN, a date of birth, an
+// account number. It has no username, it rarely goes into a password box, and
+// the same nine digits are wanted in five different shapes. What it shares with
+// a credential is the part that matters — a mandatory origin binding, a consent
+// dialog, and a guard re-asserted before every keystroke.
+//
+// The reference implementation this replaces took an arbitrary CSS selector,
+// because a human typed it. This server assumes the caller may be steered by
+// page content, so selector control is DENIED by default and granted per entry,
+// at storage time, by the human who stores it. That single flag is the whole
+// difference between the two threat models; everything else here is plumbing.
+
+/**
+ * A secret name, validated at the entry point.
+ *
+ * Independent of `consent.ts:safeSecretName` on purpose, exactly as
+ * `isValidDomain` is independent of `safeRequestedDomain`: this one keeps a
+ * hostile string out of `security` and out of the reason vocabulary, that one
+ * keeps it out of the sentence a human reads. Neither is allowed to be the only
+ * guard.
+ */
+const SECRET_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
+export function isValidSecretName(raw: string): boolean {
+  return SECRET_NAME_RE.test(raw);
+}
+
+/** `shape()` failures, mapped onto the fixed vocabulary without their message. */
+function shapeFailReason(e: unknown): string {
+  const code = (e as CdpError)?.code;
+  return code === "format_mismatch" || code === "bad_format" ? code : "format_mismatch";
+}
+
+export async function fillSecret(args: unknown, d: Deps = REAL_DEPS): Promise<FillResult> {
+  const a = (args ?? {}) as { tabId?: unknown; name?: unknown; selector?: unknown; format?: unknown; events?: unknown };
+  const tabId = typeof a.tabId === "string" ? a.tabId : "";
+  const name = typeof a.name === "string" ? a.name : "";
+  const selector = typeof a.selector === "string" && a.selector ? a.selector : null;
+  const events = Boolean(a.events);
+
+  if (!tabId) return fail("tab_unavailable");
+  // `name` is the vault key here, the way `domain` is for a credential. Missing
+  // and malformed are different mistakes, and neither is `not_found`.
+  if (!name) return fail("name_required");
+  if (!isValidSecretName(name)) return fail("bad_name");
+  const rawFormat = a.format === undefined ? "raw" : a.format;
+  if (!isSecretFormat(rawFormat)) return fail("bad_format");
+  const format: SecretFormat = rawFormat;
+
+  // KEYCHAIN ONLY, never the credential chain. `resolveCredential` would try Arc
+  // first and hand back a saved LOGIN whose username happens to equal the name —
+  // a different value than the one the human authorised, from a backend that
+  // carries no `sel`/`kind` flags. That is the substitution `resolveCredentialWith`
+  // rule 1 forbids, arriving through the back door.
+  let entry: SecretEntry | null;
+  try { entry = await d.resolveSecret(name); }
+  catch (e) { return fail(vaultFailReason(e)); }
+  if (!entry) return fail("not_found");
+
+  const savedOrigin = entry.origin;
+  if (!savedOrigin) return fail("no_origin_binding");
+
+  // The two capabilities a stored entry can grant. Both default to DENY, and
+  // both are read from the vault — never from the arguments.
+  const selAllowed = entry.flags.sel === "allow";
+  const kindText = entry.flags.kind === "text";
+
+  // Refused before the connection and before the dialog: a caller that supplies
+  // a selector for an entry that does not permit one must not be able to make a
+  // human answer a prompt about it.
+  if (selector && !selAllowed) return fail("selector_not_allowed");
+
+  return gatedOnOrigin(
+    d, tabId, savedOrigin,
+    () => d.confirmSecret(savedOrigin, name),
+    async (send, guard) => {
+      let sel = selector;
+      if (!sel) {
+        // Deep, and password boxes included: the chooser needs to SEE a password
+        // field to pick it when `kind=text` is absent, and to see the other
+        // candidates in order to refuse when there is more than one.
+        const fields = await d.probeFields(send, SECRET_ATTR, nextToken("sec"), { deep: true, includePassword: true });
+        const c = chooseSecretField(fields, { kindText });
+        if (c.ambiguous) return fail("ambiguous_secret_field");
+        sel = c.sel ?? null;
+      }
+      if (!sel) return fail("no_secret_field");
+
+      // Re-read the field the injection will actually resolve to, on BOTH paths.
+      // On the selector path this is where `kind` is enforced at all; on the
+      // probe path it re-checks the same element through the same piercing
+      // resolver the keystroke will use, so the type that was approved is the
+      // type that gets typed into.
+      const info = await d.inspectField(send, sel);
+      if (!info) return fail("no_secret_field");
+      // An opacity:0 input still takes focus, so the focus verification alone
+      // does not rule out an invisible capture box (I5).
+      if (!info.visible) return fail("field_not_visible");
+      if (!kindText && info.type !== "password") return fail("kind_not_allowed");
+
+      let value: string;
+      try { value = shape(entry.getSecret(), format); }
+      catch (e) {
+        // A vault fault and a shape refusal are different failures and must not
+        // collapse: one means "grant Keychain access", the other means "the
+        // stored value is not what this format needs".
+        const code = (e as CdpError)?.code;
+        return fail(code === "vault_locked" || code === "vault_error" ? code : shapeFailReason(e));
+      }
+      try {
+        await guard();
+        await d.typeIntoField(send, sel, value, guard, { events });
+      } finally { value = ""; }
+      return { filled: true };
+    },
+  );
+}
+
 // ── Registration ─────────────────────────────────────────────────────────────
 const TAB = {
   tabId: { type: "string", description: "CDP target id of the tab to inject into" },
   domain: { type: "string", description: "Domain of the saved credential, e.g. github.com" },
   name: { type: "string", description: "Optional Keychain entry name when several credentials share a domain" },
+} as const;
+
+const EVENTS_PROP = {
+  type: "boolean",
+  description:
+    "Fire synthetic keydown/keypress/keyup/change after the insert. Set this when a page's validator " +
+    "keys off keyup and shows 'criteria not met' against a value that is actually correct.",
 } as const;
 
 function register(name: string, description: string, inputSchema: Record<string, unknown>, fn: (args: unknown) => Promise<unknown>) {
@@ -501,7 +723,11 @@ register(
   "Type ONE field (username or password) of a saved credential into the tab's login form, after an origin match and user consent. Returns only {filled, reason?}.",
   {
     type: "object",
-    properties: { ...TAB, field: { type: "string", enum: ["username", "password"], description: "Which field to fill" } },
+    properties: {
+      ...TAB,
+      field: { type: "string", enum: ["username", "password"], description: "Which field to fill" },
+      events: EVENTS_PROP,
+    },
     required: ["tabId", "domain", "field"],
     additionalProperties: false,
   },
@@ -513,7 +739,11 @@ register(
   "Fill username and password into the tab's login form behind a single origin match and one consent prompt, optionally submitting. Returns only {filled, submitted, reason?}.",
   {
     type: "object",
-    properties: { ...TAB, submit: { type: "boolean", description: "Click the form's submit button after filling" } },
+    properties: {
+      ...TAB,
+      submit: { type: "boolean", description: "Click the form's submit button after filling" },
+      events: EVENTS_PROP,
+    },
     required: ["tabId", "domain"],
     additionalProperties: false,
   },
@@ -530,4 +760,34 @@ register(
     additionalProperties: false,
   },
   (args) => fillTotp(args),
+);
+
+register(
+  "fill_secret",
+  "Type a NAMED secret (SSN, PIN, account number) from the Keychain into a field, after an origin match " +
+  "and user consent. The entry is apinj:<name>; its stored origin is the binding. A caller-supplied " +
+  "selector is honoured only if the entry was stored with sel=allow, and a non-password field only if it " +
+  "was stored with kind=text. Returns only {filled, reason?} — never the value, its length, or a mask.",
+  {
+    type: "object",
+    properties: {
+      tabId: TAB.tabId,
+      name: { type: "string", description: "Keychain entry name; the secret is stored under apinj:<name>" },
+      selector: {
+        type: "string",
+        description: "Optional CSS selector for the target field (pierces open shadow roots). " +
+          "Refused with selector_not_allowed unless the entry was stored with sel=allow.",
+      },
+      format: {
+        type: "string",
+        enum: [...SECRET_FORMATS],
+        description: "Shape the stored value before typing: raw (default), dashed (XXX-XX-XXXX), " +
+          "last4, first3, mid2. Everything but raw requires a nine-digit stored value.",
+      },
+      events: EVENTS_PROP,
+    },
+    required: ["tabId", "name"],
+    additionalProperties: false,
+  },
+  (args) => fillSecret(args),
 );
