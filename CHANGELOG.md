@@ -5,7 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-08-26
+
+Adds `fill_secret`: typing a **named, non-credential secret** — an SSN, a
+credit-freeze PIN, a date of birth, an account number — into a field, behind the
+same origin binding, consent dialog and pre-keystroke `loaderId` guard that a
+credential fill gets.
+
+The design problem was not "add a selector argument". A single-purpose script can
+take an arbitrary CSS selector safely *because a human typed it*; this server
+assumes the caller may be steered by page content, so selector control is denied
+by default and granted per entry, at storage time, by the human who stores it.
 
 ### Added
 
