@@ -5,6 +5,17 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-10-14
+
+First release published from CI. 0.2.0 was published by hand and 0.2.1 never
+reached npm; this version carries everything in 0.2.1 plus the docs change below.
+
+### Changed
+
+- Releases publish to npm from GitHub Actions over npm trusted publishing
+  (OIDC), with a provenance attestation.
+- Docs and code comments use neutral examples instead of named sites.
+
 ## [0.2.1] - 2026-08-26
 
 Packaging and release-plumbing only. No functional change to the server: 0.2.1

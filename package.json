@@ -1,6 +1,6 @@
 {
   "name": "agentic-password-injector",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "MCP server that logs an agent into a website by injecting the credential straight into the DOM over CDP, so the model never sees the secret.",
   "type": "module",
   "license": "MIT",
