@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { resolveCredentialWith } from "../src/vault/index.ts";
-import { arcLookup, classifyCopyError } from "../src/vault/arc.ts";
+import { arcLookup, vivaldiLookup, chromiumLookup, VIVALDI, ARC, classifyCopyError } from "../src/vault/arc.ts";
 import { CdpError } from "../src/cdp.ts";
 import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -220,4 +220,106 @@ test("an entry with no acct attribute throws instead of reading as not_found", a
   try { await keychainLookup("mybank", { run: () => '"svce"<blob>="apinj:mybank"\n' }); } catch (e) { err = e; }
   expect(err).toBeInstanceOf(CE);
   expect(err.code).toBe("vault_error");
+});
+
+// ── Vivaldi first, Arc second, Keychain last ─────────────────────────────────
+
+const ROW = (u: string) => [{ origin_url: "https://x.com/login", username_value: u }];
+const enoentErr = Object.assign(new Error("no such file"), { code: "ENOENT" });
+const deniedErr = Object.assign(new Error("denied"), { code: "EPERM" });
+
+test("profiles point at the right Login Data paths and Keychain services", () => {
+  expect(VIVALDI.loginDataPath).toBe("Library/Application Support/Vivaldi/Default/Login Data");
+  expect(VIVALDI.keychainService).toBe("Vivaldi Safe Storage");
+  expect(ARC.loginDataPath).toBe("Library/Application Support/Arc/User Data/Default/Login Data");
+  expect(ARC.keychainService).toBe("Arc Safe Storage");
+});
+
+test("chromiumLookup reads the path of the profile it is given", async () => {
+  let seen = "";
+  await chromiumLookup(VIVALDI, "x.com", { copy: (src) => { seen = src; throw enoentErr; } });
+  expect(seen.endsWith(VIVALDI.loginDataPath)).toBe(true);
+});
+
+test("a Vivaldi hit wins over Arc and Keychain", async () => {
+  const r = await resolveCredentialWith(
+    {
+      vivaldi: (d, o) => vivaldiLookup(d, { copy: seedArcDb(ROW("viv")) }, o),
+      arc: (d, o) => arcLookup(d, { copy: seedArcDb(ROW("arc")) }, o),
+      keychain: async () => cred("k"),
+    },
+    "x.com", {},
+  );
+  expect(r).toMatchObject({ backend: "vivaldi" });
+  expect((r as any).cred.username).toBe("viv");
+});
+
+test("a missing Vivaldi profile falls through to Arc", async () => {
+  const r = await resolveCredentialWith(
+    {
+      vivaldi: (d, o) => vivaldiLookup(d, { copy: () => { throw enoentErr; } }, o),
+      arc: (d, o) => arcLookup(d, { copy: seedArcDb(ROW("arc")) }, o),
+      keychain: async () => cred("k"),
+    },
+    "x.com", {},
+  );
+  expect(r).toMatchObject({ backend: "arc" });
+});
+
+test("a Vivaldi fault does not block Arc", async () => {
+  const r = await resolveCredentialWith(
+    {
+      vivaldi: (d, o) => vivaldiLookup(d, { copy: () => { throw deniedErr; } }, o),
+      arc: (d, o) => arcLookup(d, { copy: seedArcDb(ROW("arc")) }, o),
+      keychain: async () => cred("k"),
+    },
+    "x.com", {},
+  );
+  expect(r).toMatchObject({ backend: "arc" });
+});
+
+test("a Vivaldi fault and an Arc miss still let Keychain through", async () => {
+  const r = await resolveCredentialWith(
+    {
+      vivaldi: (d, o) => vivaldiLookup(d, { copy: () => { throw deniedErr; } }, o),
+      arc: (d, o) => arcLookup(d, { copy: () => { throw enoentErr; } }, o),
+      keychain: async () => cred("k"),
+    },
+    "x.com", {},
+  );
+  expect(r).toMatchObject({ backend: "keychain" });
+});
+
+test("a Vivaldi fault with every other store missing surfaces vault_locked", async () => {
+  let err: any;
+  try {
+    await resolveCredentialWith(
+      {
+        vivaldi: (d, o) => vivaldiLookup(d, { copy: () => { throw deniedErr; } }, o),
+        arc: async () => null,
+        keychain: async () => null,
+      },
+      "x.com", {},
+    );
+  } catch (e) { err = e; }
+  expect(err).toBeInstanceOf(CE);
+  expect(err.code).toBe("vault_locked");
+  expect(err.message).toContain("Vivaldi");
+});
+
+test("a named lookup keeps the exact-username rule per store, Vivaldi miss then Arc hit", async () => {
+  const r = await resolveCredentialWith(
+    {
+      vivaldi: (d, o) => vivaldiLookup(d, { copy: seedArcDb(ROW("other")) }, o),
+      arc: (d, o) => arcLookup(d, { copy: seedArcDb(ROW("wanted")) }, o),
+      keychain: async () => null,
+    },
+    "x.com", { name: "wanted" },
+  );
+  expect(r).toMatchObject({ backend: "arc" });
+});
+
+test("not-found lists all three stores in order", async () => {
+  const r = await resolveCredentialWith({ vivaldi: async () => null, arc: async () => null, keychain: async () => null }, "x.com", {});
+  expect(r).toEqual({ found: false, tried: ["vivaldi", "arc", "keychain"] });
 });

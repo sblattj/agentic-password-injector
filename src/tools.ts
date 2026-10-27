@@ -24,7 +24,7 @@ export interface Deps {
   getOrigin: (send: Send) => Promise<string>;
   /** Browser-side identity of the CURRENT document load — the anti-TOCTOU token. */
   getLoaderId: (send: Send) => Promise<string>;
-  /** Keychain-only, by NAME. A named secret must never resolve through Arc — see `fillSecret`. */
+  /** Keychain-only, by NAME. A named secret must never resolve through a browser store — see `fillSecret`. */
   resolveSecret: (name: string) => Promise<SecretEntry | null>;
   /** Prompts with the credential's BOUND origin; the caller domain is context only. */
   confirmInjection: (boundOrigin: string, username: string, requestedDomain: string) => Promise<boolean>;
@@ -72,7 +72,7 @@ const fail = (reason: string): FillResult => ({ filled: false, reason });
  * The origin a credential is BOUND to. Never derived from the caller-supplied
  * domain: doing so would make the gate compare the tab against a value the caller
  * chose, i.e. no binding at all — `login({domain:"evil.com", name:"mybank"})` on
- * evil.com would pass. Arc creds always carry a real origin; Keychain creds carry
+ * evil.com would pass. Browser creds always carry a real origin; Keychain creds carry
  * whatever was stored in the entry's comment attribute, and an empty one FAILS
  * CLOSED at the call site with `no_origin_binding`.
  */
@@ -129,7 +129,7 @@ function secretFailReason(e: unknown): string {
 
 /**
  * A vault that ERRORED is not a vault that came back empty. A Keychain access
- * denial or an Arc `Login Data` SQLITE_BUSY must never present as `not_found`,
+ * denial or a browser `Login Data` SQLITE_BUSY must never present as `not_found`,
  * which reads like "you have no such credential" and invites a retry loop.
  */
 function vaultFailReason(e: unknown): string {
@@ -623,7 +623,7 @@ export async function fillSecret(args: unknown, d: Deps = REAL_DEPS): Promise<Fi
   if (!isSecretFormat(rawFormat)) return fail("bad_format");
   const format: SecretFormat = rawFormat;
 
-  // KEYCHAIN ONLY, never the credential chain. `resolveCredential` would try Arc
+  // KEYCHAIN ONLY, never the credential chain. `resolveCredential` would try the browser stores
   // first and hand back a saved LOGIN whose username happens to equal the name —
   // a different value than the one the human authorised, from a backend that
   // carries no `sel`/`kind` flags. That is the substitution `resolveCredentialWith`

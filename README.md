@@ -48,7 +48,7 @@ Each fill raises a real macOS dialog (`buildDialogScript` / `confirmInjection`, 
 
 ### 5. Keychain credentials fail closed with no stored origin
 
-A credential with no bound origin cannot be gated, so it is not injectable: `no_origin_binding`, refused before the connection and before any prompt (`gated`, `src/tools.ts`). There is deliberately **no** fallback to the caller's domain — that would mean comparing the tab against a value the caller chose, i.e. no binding at all, and `login({domain: "evil.com", name: "mybank"})` on `evil.com` would pass. Arc logins carry their real origin already; Keychain entries carry whatever you stored in `-j` (see below).
+A credential with no bound origin cannot be gated, so it is not injectable: `no_origin_binding`, refused before the connection and before any prompt (`gated`, `src/tools.ts`). There is deliberately **no** fallback to the caller's domain — that would mean comparing the tab against a value the caller chose, i.e. no binding at all, and `login({domain: "evil.com", name: "mybank"})` on `evil.com` would pass. Vivaldi and Arc logins carry their real origin already; Keychain entries carry whatever you stored in `-j` (see below).
 
 ### 6. No reveal path, and no enumeration oracle
 
@@ -58,7 +58,7 @@ Because `list_credentials` has no dialog and no origin gate (correctly — it re
 
 ### 7. Faults never masquerade as misses
 
-A locked Keychain, a denied ACL, or an unreadable Arc `Login Data` is a **vault error**, not `not_found` — reporting the latter reads as "you have no such credential" and sends you (or a retrying agent) hunting for an entry that was never the problem. `isItemNotFound` (`src/vault/keychain.ts`) treats only `errSecItemNotFound` as a miss; `classifyCopyError` (`src/vault/arc.ts`) distinguishes ENOENT from denial; and an Arc fault does not hide a Keychain credential but *is* re-thrown if every backend misses (`resolveCredentialWith`, `src/vault/index.ts`).
+A locked Keychain, a denied ACL, or an unreadable Vivaldi or Arc `Login Data` is a **vault error**, not `not_found` — reporting the latter reads as "you have no such credential" and sends you (or a retrying agent) hunting for an entry that was never the problem. `isItemNotFound` (`src/vault/keychain.ts`) treats only `errSecItemNotFound` as a miss; `classifyCopyError` (`src/vault/arc.ts`) distinguishes ENOENT from denial; and a browser-store fault does not hide a credential in a later store but *is* re-thrown if every backend misses (`resolveCredentialWith`, `src/vault/index.ts`).
 
 ### 8. It refuses to guess which field to type into
 
@@ -79,7 +79,7 @@ So the reach is granted **per entry, at storage time, by a human**, in the Keych
 - `sel=allow` — this entry permits a caller-supplied `selector`. **Default deny.**
 - `kind=text` — this secret may land in a non-password input. **Default deny**, which is the protection `chooseFields` gets for free by keying on `type === "password"`.
 
-Everything else is unchanged: the origin binding is mandatory and fails closed, one consent dialog per injection (naming the *entry* as well as the bound origin, because "type ssn-full into forms.example.com" is a different question from "log in to forms.example.com"), and the `loaderId` guard re-asserted immediately before the keystroke. Resolution is **Keychain-only** — routing through the credential chain would let an Arc row whose username matched the name substitute a saved login, from a backend that carries no flags.
+Everything else is unchanged: the origin binding is mandatory and fails closed, one consent dialog per injection (naming the *entry* as well as the bound origin, because "type ssn-full into forms.example.com" is a different question from "log in to forms.example.com"), and the `loaderId` guard re-asserted immediately before the keystroke. Resolution is **Keychain-only** — routing through the credential chain would let a Vivaldi or Arc row whose username matched the name substitute a saved login, from a backend that carries no flags.
 
 Without `sel=allow`, auto-detection is one candidate or refuse (`chooseSecretField`, `src/tools.ts`). There is no naming heuristic and no focus tiebreak, unlike the OTP path: an SSN announces nothing about itself, does not expire in thirty seconds, and page script can focus whatever it likes. Adding an input creates ambiguity, and ambiguity refuses — so script on the matched origin can *deny* a fill but cannot redirect one.
 
@@ -92,9 +92,9 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 - **Not a password manager.** It reads existing vaults. No create, edit, generate, or delete.
 - **It does not make banking hands-free.** Every fill is gated behind a human clicking Allow, per use. This makes agent-assisted login *possible with you approving each step*, not autonomous. If that's what you wanted, this is the wrong tool.
 - **No SMS or email OTP.** Those can't be vaulted. Authenticator-app TOTP works only if you store the seed yourself.
-- **macOS only.** The vault backends shell out to `security`, the Arc store lives under `~/Library`, and the consent dialog is `osascript`.
-- **Chromium-family browser with a CDP debug port required.** Arc, Chrome, Edge, Brave. No Firefox, no Safari.
-- **Arc is the only browser *vault* backend.** Chrome's own store is not read yet (the backend interface is pluggable; a `1password-op` backend doesn't exist either).
+- **macOS only.** The vault backends shell out to `security`, the browser stores live under `~/Library`, and the consent dialog is `osascript`.
+- **Chromium-family browser with a CDP debug port required.** Vivaldi, Arc, Chrome, Edge, Brave. No Firefox, no Safari.
+- **Vivaldi and Arc are the only browser *vault* backends** (looked up in that order, then the Keychain). Chrome's own store is not read yet (the backend interface is pluggable; a `1password-op` backend doesn't exist either).
 - **Bun-only.** `bun:sqlite`, `bun:test`, and direct `.ts` imports have no node equivalent, so there is no node engine range that would be true. Not zero-dependency either: it depends on `@modelcontextprotocol/sdk`.
 - **The origin gate is the security boundary, and it is only as good as the stored origin.** A credential bound to a page that itself has an XSS is still injectable into that page.
 
@@ -112,7 +112,7 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 
 - `tabId` is a **CDP target id** — always explicit, never "the active tab".
 - `domain` is the domain of the *saved credential* (`github.com`), and must be a registrable domain.
-- `name` selects a specific credential when several share a domain: an Arc row whose username is `name`, or the Keychain entry stored under `apinj:<name>`. A supplied `name` that matches nothing is a miss, never a substitution — returning a different account would show the wrong username in the dialog.
+- `name` selects a specific credential when several share a domain: a Vivaldi or Arc row whose username is `name`, or the Keychain entry stored under `apinj:<name>`. A supplied `name` that matches nothing is a miss, never a substitution — returning a different account would show the wrong username in the dialog.
 - `login` is one origin check and **one** dialog for username + password (+ optional submit). `fill_credential` exists for identifier-first flows (Google, Microsoft) where the password field isn't on the page yet.
 - `fill_totp` reads the seed, computes the code, types it, and drops both. Neither is ever returned.
 - `fill_secret` types a **named non-credential secret** — an SSN, a freeze PIN, a date of birth, an account number. It takes no `domain`: the Keychain entry `apinj:<name>` *is* the lookup key, and its stored origin is the binding. See [named secrets](#9-named-secrets-are-a-narrower-capability-not-a-selector-api) below and `docs/keychain-setup.md`.
@@ -140,6 +140,8 @@ bun test          # 206 tests
 ```sh
 # Chrome
 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+# Vivaldi
+"/Applications/Vivaldi.app/Contents/MacOS/Vivaldi" --remote-debugging-port=9222
 # Arc
 "/Applications/Arc.app/Contents/MacOS/Arc" --remote-debugging-port=9222
 ```
@@ -166,13 +168,13 @@ CDP_BASE = "http://127.0.0.1:9222"
 
 No secrets belong in that file — the server reads them from the vault at use time.
 
-The first fill will make macOS prompt for Keychain access (for the Arc `Safe Storage` key) and may need Full Disk Access for the Arc store; grant it to the process running Bun.
+The first fill will make macOS prompt for Keychain access (for the `Vivaldi Safe Storage` or `Arc Safe Storage` key) and may need Full Disk Access for the browser store; grant it to the process running Bun.
 
 ---
 
 ## Importing credentials
 
-**Arc — nothing to do.** Arc's saved logins are read directly and already carry their real origin.
+**Vivaldi and Arc — nothing to do.** Their saved logins are read directly (Vivaldi first, then Arc) and already carry their real origin.
 
 **macOS Keychain — one command per credential.** The origin goes in the generic-password *comment* attribute (`-j`), and is **mandatory**: without it the credential is refused with `no_origin_binding`.
 
@@ -203,7 +205,7 @@ Full details, verification commands, and how to fix an entry that's missing its 
 | Model never sees the secret | ✅ | ✅ | ✅ |
 | Self-hosted / local-only | ✅ entirely on your machine | ❌ hosted service | ✅ self-hostable |
 | Subscription | none | paid plan | open-core |
-| Credential migration | none — reads Arc + Keychain in place | import into 1Password | store secrets in the vault |
+| Credential migration | none — reads Vivaldi, Arc + Keychain in place | import into 1Password | store secrets in the vault |
 | Per-use human approval | ✅ native dialog, defaults to Deny | ✅ | policy-based |
 | Origin binding enforced from the vault | ✅ + re-asserted per keystroke | ✅ | n/a (not browser-autofill shaped) |
 | Platforms | macOS only | macOS, Windows, Linux | cross-platform |

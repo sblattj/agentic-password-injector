@@ -1,7 +1,8 @@
 # Keychain credential setup
 
-Credentials can come from two backends: **Arc**'s saved-login database (read
-automatically, no setup) and the **macOS Keychain** (set up by hand, below).
+Credentials can come from these backends, tried in this order: **Vivaldi**'s
+saved-login database, **Arc**'s saved-login database (both read automatically,
+no setup), and the **macOS Keychain** (set up by hand, below).
 
 ## The origin is required
 
@@ -78,9 +79,9 @@ The seed is base32, as printed next to the enrolment QR code. It is read only
 inside `fill_totp`, used to compute the current code, and neither the seed nor
 the generated code is ever returned to the caller.
 
-## Arc credentials
+## Vivaldi and Arc credentials
 
-Arc logins already carry their real origin, so they need no setup and are
+Vivaldi and Arc logins already carry their real origin, so they need no setup and are
 unaffected by the rule above.
 
 ## Named secrets (non-credential values)

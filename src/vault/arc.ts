@@ -7,9 +7,28 @@ import { decryptChromium } from "./decrypt.ts";
 import { CdpError } from "../cdp.ts";
 import { PUBLIC_SUFFIXES as SUFFIXES } from "../domain.ts";
 export interface Cred { origin: string; username: string; getSecret: () => string; }
-function keychainSecret(): string {
-  try { return execFileSync("security", ["find-generic-password", "-s", "Arc Safe Storage", "-w"], { encoding: "utf8" }).trim(); }
-  catch { throw new CdpError("vault_locked", "Arc Safe Storage key unreadable — grant Keychain access"); }
+/** One Chromium-family browser whose saved logins we can read. */
+export interface BrowserProfile {
+  /** Display name, used in error messages. */
+  name: string;
+  /** Path of the `Login Data` file, relative to the home directory. */
+  loginDataPath: string;
+  /** macOS Keychain service holding the "<name> Safe Storage" key. */
+  keychainService: string;
+}
+export const VIVALDI: BrowserProfile = {
+  name: "Vivaldi",
+  loginDataPath: "Library/Application Support/Vivaldi/Default/Login Data",
+  keychainService: "Vivaldi Safe Storage",
+};
+export const ARC: BrowserProfile = {
+  name: "Arc",
+  loginDataPath: "Library/Application Support/Arc/User Data/Default/Login Data",
+  keychainService: "Arc Safe Storage",
+};
+function keychainSecret(p: BrowserProfile): string {
+  try { return execFileSync("security", ["find-generic-password", "-s", p.keychainService, "-w"], { encoding: "utf8" }).trim(); }
+  catch { throw new CdpError("vault_locked", `${p.keychainService} key unreadable, grant Keychain access`); }
 }
 // Multi-label public suffixes, single-sourced in src/domain.ts (the list itself
 // had drifted 78 entries behind the entry-point copy). Not the full PSL — the job
@@ -53,7 +72,7 @@ export function hostMatches(host: string, domain: string): boolean {
   return h === d || h.endsWith("." + d);
 }
 /**
- * "Arc is not installed / has no login DB" is a MISS. "macOS refused to let us
+ * "The browser is not installed / has no login DB" is a MISS. "macOS refused to let us
  * read it" is a FAULT. Collapsing the second into the first reports a locked
  * vault as `not_found`, which reads like "you have no such credential" — the
  * bad-credential-looking shape invariant #3 forbids.
@@ -69,17 +88,19 @@ export function classifyCopyError(e: unknown): "missing" | "denied" {
 }
 
 export interface ArcIo { copy?: (src: string, dest: string) => void }
+export type BrowserIo = ArcIo;
 
-export async function arcLookup(domain: string, io: ArcIo = {}, opts: { name?: string } = {}): Promise<Cred | null> {
+/** Read saved logins from any Chromium-family browser described by `profile`. */
+export async function chromiumLookup(profile: BrowserProfile, domain: string, io: BrowserIo = {}, opts: { name?: string } = {}): Promise<Cred | null> {
   const copy = io.copy ?? copyFileSync;
-  const src = join(homedir(), "Library/Application Support/Arc/User Data/Default/Login Data");
+  const src = join(homedir(), profile.loginDataPath);
   const dir = mkdtempSync(join(tmpdir(), "apinj-"));
   const tmp = join(dir, "Login Data");
   try {
     try { copy(src, tmp); }
     catch (e) {
       if (classifyCopyError(e) === "missing") return null; // genuine miss
-      throw new CdpError("vault_locked", "Arc Login Data unreadable — grant Full Disk Access");
+      throw new CdpError("vault_locked", `${profile.name} Login Data unreadable, grant Full Disk Access`);
     }
     const db = new Database(tmp, { readonly: true });
     let rows: { origin_url: string; username_value: string; password_value: Uint8Array }[];
@@ -96,8 +117,11 @@ export async function arcLookup(domain: string, io: ArcIo = {}, opts: { name?: s
       try { return hostMatches(new URL(r.origin_url).hostname, domain); } catch { return false; }
     });
     if (!row) return null;
-    return { origin: new URL(row.origin_url).origin, username: row.username_value, getSecret: () => decryptChromium(Buffer.from(row.password_value), keychainSecret()) };
+    return { origin: new URL(row.origin_url).origin, username: row.username_value, getSecret: () => decryptChromium(Buffer.from(row.password_value), keychainSecret(profile)) };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
+
+export const vivaldiLookup = (domain: string, io: BrowserIo = {}, opts: { name?: string } = {}) => chromiumLookup(VIVALDI, domain, io, opts);
+export const arcLookup = (domain: string, io: BrowserIo = {}, opts: { name?: string } = {}) => chromiumLookup(ARC, domain, io, opts);

@@ -1,6 +1,6 @@
 export class CdpError extends Error { constructor(public code: string, msg?: string) { super(msg ? `${code}: ${msg}` : code); } }
 // 9222 is the ecosystem-default Chromium remote-debugging port. A browser started
-// on a different port (e.g. Arc on 9333) is pointed at via the CDP_BASE env var.
+// on a different port (e.g. Vivaldi on 9333) is pointed at via the CDP_BASE env var.
 const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
 const TIMEOUT = Number(process.env.CDP_TIMEOUT_MS ?? 15000);
 interface RawTarget { id: string; type: string; url: string; webSocketDebuggerUrl?: string; }

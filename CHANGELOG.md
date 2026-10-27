@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Saved logins are now read from Vivaldi first (`Vivaldi Safe Storage`), then
+  Arc, then the macOS Keychain. The resolved backend is reported as `vivaldi`,
+  `arc` or `keychain`.
+
+### Changed
+
+- The Arc reader is now a general Chromium-store reader (`chromiumLookup`) that
+  takes a browser name, a `Login Data` path and a Keychain service. A missing
+  browser profile is a miss; a denied read is a fault that does not block later
+  stores.
+
 ## [0.2.2] - 2026-10-14
 
 First release published from CI. 0.2.0 was published by hand and 0.2.1 never
