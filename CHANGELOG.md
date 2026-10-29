@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Fills are auto-approved by default.** The per-use Allow/Deny dialog no
+  longer appears unless you set `APINJ_CONFIRM=1` (or `true`/`yes`/`on`) in the
+  server's env; that one switch covers both `login`/`fill_credential` and
+  `fill_secret`. Origin binding and the per-keystroke `loaderId` guard still run
+  on every fill. `user_denied` is now only returned with the dialog on.
 - The Arc reader is now a general Chromium-store reader (`chromiumLookup`) that
   takes a browser name, a `Login Data` path and a Keychain service. A missing
   browser profile is a miss; a denied read is a fault that does not block later

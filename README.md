@@ -42,9 +42,11 @@ The final re-assertion is *inside* `typeIntoField` (`src/inject.ts`), as the las
 
 Both facts are also required to be *knowable*: an empty `loaderId` fails closed as `tab_unavailable`, never as "unchanged".
 
-### 4. A per-use native Allow/Deny dialog
+### 4. An opt-in per-use native Allow/Deny dialog
 
-Each fill raises a real macOS dialog (`buildDialogScript` / `confirmInjection`, `src/consent.ts`) showing the **bound host and the username** — never the password. It defaults to **Deny**, and anything other than an explicit Allow (including the 60-second timeout and any osascript failure) is a denial. The caller-supplied domain is unauthenticated text, so it is rendered only as trailing context and only when it is domain-shaped and under 64 chars (`safeRequestedDomain`) — otherwise the dialog shows the vault-derived origin alone, so a caller can't pad the prompt or talk you into clicking Allow.
+**Off by default: fills are auto-approved.** The origin binding (§1, §2, §5) and the per-keystroke guard (§3) still run on every fill; only the human prompt is skipped. Set `APINJ_CONFIRM=1` (also `true`/`yes`/`on`) in the server's env to turn the dialog back on, for both logins and named secrets (`dialogRequired`, `src/consent.ts`).
+
+With it on, each fill raises a real macOS dialog (`buildDialogScript` / `confirmInjection`, `src/consent.ts`) showing the **bound host and the username** — never the password. It defaults to **Deny**, and anything other than an explicit Allow (including the 60-second timeout and any osascript failure) is a denial. The caller-supplied domain is unauthenticated text, so it is rendered only as trailing context and only when it is domain-shaped and under 64 chars (`safeRequestedDomain`) — otherwise the dialog shows the vault-derived origin alone, so a caller can't pad the prompt or talk you into clicking Allow.
 
 ### 5. Keychain credentials fail closed with no stored origin
 
@@ -164,6 +166,7 @@ args = ["/path/to/agentic-password-injector/src/mcp.ts"]
 
 [servers."agentic-password-injector".env]
 CDP_BASE = "http://127.0.0.1:9222"
+# APINJ_CONFIRM = "1"   # opt in to an Allow/Deny dialog per fill (default: auto-approve)
 ```
 
 No secrets belong in that file — the server reads them from the vault at use time.
@@ -206,7 +209,7 @@ Full details, verification commands, and how to fix an entry that's missing its 
 | Self-hosted / local-only | ✅ entirely on your machine | ❌ hosted service | ✅ self-hostable |
 | Subscription | none | paid plan | open-core |
 | Credential migration | none — reads Vivaldi, Arc + Keychain in place | import into 1Password | store secrets in the vault |
-| Per-use human approval | ✅ native dialog, defaults to Deny | ✅ | policy-based |
+| Per-use human approval | opt-in (`APINJ_CONFIRM=1`): native dialog, defaults to Deny | ✅ | policy-based |
 | Origin binding enforced from the vault | ✅ + re-asserted per keystroke | ✅ | n/a (not browser-autofill shaped) |
 | Platforms | macOS only | macOS, Windows, Linux | cross-platform |
 | Browsers | Chromium-family over CDP | first-party extension + browser support | n/a |

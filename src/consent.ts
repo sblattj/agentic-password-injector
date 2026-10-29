@@ -84,6 +84,18 @@ export function buildSecretDialogScript(boundOrigin: string, secretName?: string
   return `display dialog "Type ${what} into ${esc(host)}?" buttons {"Deny","Allow"} default button "Deny" with title "agentic-password-injector" giving up after 60`;
 }
 
+/**
+ * Whether a fill raises the Allow/Deny dialog at all. Off by default: every fill
+ * is auto-approved, and the protections that do not need a human (mandatory
+ * origin binding, the pre-keystroke `loaderId` guard) still run. Set
+ * `APINJ_CONFIRM=1` (or `true`/`yes`/`on`) to get the per-use dialog back for
+ * both credentials and named secrets. Read on every call, so a restart is not
+ * needed to pick up a change in a long-lived env.
+ */
+export function dialogRequired(env: Record<string, string | undefined> = process.env): boolean {
+  return /^(1|true|yes|on)$/i.test((env.APINJ_CONFIRM ?? "").trim());
+}
+
 const realRunner: DialogRunner = (s) => execFileSync("osascript", ["-e", s], { encoding: "utf8" });
 
 export async function confirmInjection(

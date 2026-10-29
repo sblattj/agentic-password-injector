@@ -1,5 +1,5 @@
 import { CdpError, getLoaderId, getOrigin, resolveTarget, withConn, type Send } from "./cdp.ts";
-import { confirmInjection, confirmSecretInjection } from "./consent.ts";
+import { confirmInjection, confirmSecretInjection, dialogRequired } from "./consent.ts";
 import { PUBLIC_SUFFIXES } from "./domain.ts";
 import { decideGate } from "./gate.ts";
 import { VISIBLE_FN, detectLoginFields, inspectField, typeIntoField, type TypeOptions } from "./inject.ts";
@@ -48,8 +48,9 @@ export const REAL_DEPS: Deps = {
   withConn,
   getOrigin,
   getLoaderId,
-  confirmInjection: (origin, u, requested) => confirmInjection(origin, u, requested),
-  confirmSecret: (origin, name) => confirmSecretInjection(origin, name),
+  // Auto-approve unless the user opted into the dialog (`APINJ_CONFIRM=1`).
+  confirmInjection: async (origin, u, requested) => !dialogRequired() || confirmInjection(origin, u, requested),
+  confirmSecret: async (origin, name) => !dialogRequired() || confirmSecretInjection(origin, name),
   detectLoginFields,
   typeIntoField,
   probeFields,

@@ -174,3 +174,25 @@ test("the bound host is derived from the ORIGIN, never from anything the caller 
   const s = buildSecretDialogScript("https://auth.realbank.com:8443", "ssn");
   expect(s).toContain("into auth.realbank.com:8443?");
 });
+
+// ── Default is auto-approve; APINJ_CONFIRM opts back into the dialog ─────────
+
+import { dialogRequired } from "../src/consent.ts";
+import { REAL_DEPS } from "../src/tools.ts";
+
+test("dialogRequired: off unless APINJ_CONFIRM is a truthy word", () => {
+  expect(dialogRequired({})).toBe(false);
+  for (const v of ["", "0", "false", "no", "off", "nope"]) expect(dialogRequired({ APINJ_CONFIRM: v })).toBe(false);
+  for (const v of ["1", "true", "TRUE", "yes", "on", " on "]) expect(dialogRequired({ APINJ_CONFIRM: v })).toBe(true);
+});
+
+test("REAL_DEPS auto-approves both fills when APINJ_CONFIRM is unset", async () => {
+  const prev = process.env.APINJ_CONFIRM;
+  delete process.env.APINJ_CONFIRM;
+  try {
+    expect(await REAL_DEPS.confirmInjection("https://x.com", "u", "x.com")).toBe(true);
+    expect(await REAL_DEPS.confirmSecret("https://x.com", "ssn")).toBe(true);
+  } finally {
+    if (prev !== undefined) process.env.APINJ_CONFIRM = prev;
+  }
+});
