@@ -11,7 +11,7 @@
 import { expect, test } from "bun:test";
 import { MANIFEST, TOOLS, fillCredential, fillSecret, fillTotp, listCredentials, login } from "../src/tools.ts";
 
-const EXPECTED = ["list_credentials", "fill_credential", "login", "fill_totp", "fill_secret"];
+const EXPECTED = ["list_credentials", "fill_credential", "login", "fill_totp", "fill_secret", "save_credential"];
 
 /**
  * What each tool's HANDLER actually reads out of `args`, transcribed from the
@@ -31,9 +31,12 @@ const CONTRACT: Record<string, { required: string[]; optional: string[] }> = {
   // fillSecret reads: tabId, name, selector, format, events — and NO domain: the
   // Keychain entry is the lookup key and its stored origin is the binding.
   fill_secret: { required: ["tabId", "name"], optional: ["selector", "format", "events"] },
+  // saveCredential reads: name, origin, username, replace. No tabId: it never
+  // touches a browser, and the password comes from the dialog, never from args.
+  save_credential: { required: ["name", "origin", "username"], optional: ["replace"] },
 };
 
-test("MANIFEST names, TOOLS keys and the five shipped tools are the SAME set", () => {
+test("MANIFEST names, TOOLS keys and the six shipped tools are the SAME set", () => {
   const manifestNames = MANIFEST.map((t) => t.name);
   // No duplicates: a second `register("login", …)` would silently shadow the
   // handler in TOOLS while leaving two entries in the manifest.

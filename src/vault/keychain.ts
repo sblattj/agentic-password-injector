@@ -170,6 +170,134 @@ export async function keychainSecret(name: string, io: KeychainIo = {}): Promise
   };
 }
 
+// ── Writing a credential (`save_credential`) ─────────────────────────────────
+//
+// The password must never appear on argv: any local user can read another
+// process's arguments with `ps`. So the write goes through `security -i`, which
+// reads commands from STDIN, over a pipe.
+//
+// `security -i` is LINE-oriented and has its own quoting, which is why every
+// value is checked here, not just at the tool entry point (the same
+// belt-and-braces split as `isValidSecretName` / `safeSecretName`):
+//
+// - A newline or carriage return would END the command and turn the rest of the
+//   value into a SECOND command. Every control character is refused.
+// - Inside double quotes, `\"` is a quote and `\\` is a backslash (probed on
+//   macOS: `a\b`, `a\\b`, `ab\`, `a\"b`, `it's`, `$HOME`, `{}[]|&;#!*?~%^`
+//   all round-trip byte for byte).
+// - The line buffer is about 4 KB. A 4000-char password was TRUNCATED to 3998
+//   chars and still stored, with exit 1. `SAVE_PASSWORD_MAX` keeps the whole
+//   escaped line far below that.
+// - Tab and non-ASCII bytes are stored correctly, but `find-generic-password -w`
+//   then prints the value as HEX, and `getSecret` above would type the hex. A
+//   leading or trailing space would be lost to `getSecret`'s trim. Those values
+//   are refused rather than saved in a form `login` would mangle.
+// - A username with `"`, `\` or non-ASCII is stored, but `parseAcct` cannot read
+//   it back (it returns a truncated name or null), so it is refused too.
+
+/** Longest password `save_credential` accepts. Escaped, it is at most 2048 chars. */
+export const SAVE_PASSWORD_MAX = 1024;
+export const SAVE_USERNAME_MAX = 128;
+
+/** Printable ASCII, no control characters. */
+const PRINTABLE_ASCII = /^[\x20-\x7e]+$/;
+
+/**
+ * True when `security -i` can carry the password AND the existing read path
+ * (`getSecret`) returns it unchanged. The reason it fails is never reported:
+ * "too long" or "has a tab" is a fact about a secret the model must not learn.
+ */
+export function isStorablePassword(pw: string): boolean {
+  if (typeof pw !== "string" || pw.length === 0 || pw.length > SAVE_PASSWORD_MAX) return false;
+  if (!PRINTABLE_ASCII.test(pw)) return false;
+  return pw === pw.trim();
+}
+
+/** Printable ASCII without `"` or `\`, 1 to 128 chars: what `parseAcct` reads back intact. */
+export function isStorableUsername(u: string): boolean {
+  if (typeof u !== "string" || u.length === 0 || u.length > SAVE_USERNAME_MAX) return false;
+  return PRINTABLE_ASCII.test(u) && !/["\\]/.test(u);
+}
+
+/**
+ * One double-quoted `security -i` argument. Throws (fixed text, no value) on a
+ * control character or a non-ASCII byte, so a value that could split the
+ * command line never reaches the pipe, whatever the caller validated.
+ */
+export function securityQuote(v: string): string {
+  if (!PRINTABLE_ASCII.test(v)) throw new CdpError("vault_error", "value cannot be written safely");
+  return `"${v.replace(/[\\"]/g, "\\$&")}"`;
+}
+
+/** Runs `security -i` with `input` on stdin. Output and stderr are discarded by callers. */
+export type SecurityStdinRunner = (input: string) => string;
+
+const realRunStdin: SecurityStdinRunner = (input) =>
+  execFileSync("security", ["-i"], { input, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] });
+
+export interface KeychainWriteIo { run?: SecurityRunner; runStdin?: SecurityStdinRunner }
+
+/**
+ * Whether `apinj:<name>` exists, and under which account. ATTRIBUTES ONLY: no
+ * `-g` (which prints the secret on stderr) and no `-w`. Returns null on a miss
+ * and throws `vault_locked` on a fault, like every other read here.
+ */
+export function keychainExisting(name: string, io: KeychainWriteIo = {}): { account: string | null } | null {
+  const attrs = securityRun(["find-generic-password", "-s", svc(name)], io.run);
+  return attrs === null ? null : { account: parseAcct(attrs) };
+}
+
+export interface NewCredential { name: string; origin: string; username: string; password: string }
+
+/**
+ * Writes `apinj:<name>` with the account, the bound origin in the comment, and
+ * the password, all over stdin. `replace` names the account of the entry being
+ * replaced (from `keychainExisting`); omit it for a new entry.
+ *
+ * Replacing is NOT just `-U`: `-U` matches on service AND account, so with a
+ * different username it adds a SECOND item under `apinj:<name>` and the stale
+ * one keeps winning lookups (probed). So:
+ * - same account: `add-generic-password -U` updates the password and comment in place;
+ * - different account: add the new item first, then delete the old one by
+ *   account, so a failed add never loses the credential that was there.
+ *
+ * Every failure throws `vault_error` with fixed text. Nothing from `security`'s
+ * output, and nothing of the password, reaches an error.
+ */
+export function keychainStore(c: NewCredential, opts: { replace?: { account: string | null } } = {}, io: KeychainWriteIo = {}): void {
+  if (!isStorablePassword(c.password) || !isStorableUsername(c.username)) {
+    throw new CdpError("vault_error", "value cannot be written safely");
+  }
+  const runStdin = io.runStdin ?? realRunStdin;
+  const run = io.run ?? realRun;
+  const prev = opts.replace;
+  const inPlace = prev !== undefined && prev.account === c.username;
+  const line = [
+    "add-generic-password",
+    ...(inPlace ? ["-U"] : []),
+    "-s", securityQuote(svc(c.name)),
+    "-a", securityQuote(c.username),
+    "-j", securityQuote(c.origin),
+    "-w", securityQuote(c.password),
+  ].join(" ") + "\n";
+  const del = (args: string[]) => {
+    try { run(args); }
+    catch (e) { if (!isItemNotFound(e)) throw new CdpError("vault_error", "old keychain entry could not be removed"); }
+  };
+  // An old entry with NO account attribute is already unusable (`keychainLookup`
+  // rejects it) and cannot be selected by `-a`, so it is removed BEFORE the add:
+  // deleting by service alone afterwards could hit the new item instead.
+  if (prev !== undefined && !inPlace && !prev.account) del(["delete-generic-password", "-s", svc(c.name)]);
+  try {
+    runStdin(line);
+  } catch {
+    throw new CdpError("vault_error", "keychain write failed");
+  }
+  if (prev !== undefined && !inPlace && prev.account) {
+    del(["delete-generic-password", "-s", svc(c.name), "-a", prev.account]);
+  }
+}
+
 function totpSvc(name: string) { return `apinj-totp:${name}`; }
 
 /**

@@ -17,7 +17,40 @@ tab against a value the caller itself chose, so
 `login({ domain: "evil.com", name: "mybank" })` on `evil.com` would pass. The
 origin has to come from the vault, not from the request.
 
-## Adding a credential
+## Adding a credential the easy way
+
+Ask the agent to call `save_credential`:
+
+```json
+{ "name": "example", "origin": "https://login.example.com", "username": "alice@example.com" }
+```
+
+A macOS dialog appears: *Save a login for login.example.com as
+alice@example.com (entry 'example')? Paste the password:*. Type or paste the
+password into the hidden field and click **Save**. The password goes from the
+dialog straight to the Keychain; the agent only ever sees
+`{ saved: true, name, origin, username, backend: "keychain" }`.
+
+This is also the way to copy a password that lives somewhere the injector
+cannot read, such as Passwords.app (iCloud Keychain): open the entry there,
+copy the password, and paste it into the dialog.
+
+- `origin` must be `https://` (plain `http://` only for `localhost` and
+  `127.0.0.1`), and is stored as scheme + host (+ port), with any path dropped.
+- `name` is `[a-z0-9][a-z0-9._-]`, up to 64 characters.
+- `username` is 1 to 128 printable ASCII characters, with no `"` or `\`.
+- The password must be printable ASCII, at most 1024 characters, with no
+  leading or trailing space. Anything else is refused with
+  `password_unsupported` instead of being saved in a form `login` would type
+  wrongly (the Keychain prints tabs and non-ASCII passwords back as hex). For
+  such a password, use the manual command below.
+- An existing `apinj:<name>` is refused with `exists` unless you pass
+  `"replace": true`. Replacing with a different username leaves exactly one
+  entry, the new one.
+- Cancel, an empty answer, or 120 seconds without an answer saves nothing
+  (`user_cancelled`).
+
+## Adding a credential by hand
 
 Store the origin in the generic-password **comment** attribute with `-j`:
 

@@ -98,6 +98,58 @@ export function dialogRequired(env: Record<string, string | undefined> = process
 
 const realRunner: DialogRunner = (s) => execFileSync("osascript", ["-e", s], { encoding: "utf8" });
 
+/**
+ * The `save_credential` prompt: a human types (or pastes) the password into a
+ * HIDDEN answer field, and only `text returned` comes back, so the button name
+ * never mixes with the secret.
+ *
+ * Every caller value is checked again here before it lands in the sentence: the
+ * origin is reduced to its host, the name must pass `safeSecretName`, and the
+ * username has quotes, backslashes and control characters stripped for DISPLAY
+ * (the tool refuses such usernames anyway; this is the second guard).
+ */
+export const SAVE_DIALOG_TIMEOUT_S = 120;
+
+export function displayUsername(raw: string): string {
+  return raw.replace(/[\x00-\x1f\x7f"\\]/g, "").slice(0, 128);
+}
+
+export function buildSavePasswordDialogScript(origin: string, username: string, name: string): string {
+  const esc = (s: string) => s.replace(/[\\"]/g, "\\$&");
+  const host = boundHost(origin);
+  const entry = safeSecretName(name) ?? "unnamed";
+  const text = `Save a login for ${esc(host)} as ${esc(displayUsername(username))} (entry '${esc(entry)}')? Paste the password:`;
+  return `text returned of (display dialog "${text}" default answer "" with hidden answer ` +
+    `buttons {"Cancel","Save"} default button "Save" cancel button "Cancel" ` +
+    `with title "agentic-password-injector" giving up after ${SAVE_DIALOG_TIMEOUT_S})`;
+}
+
+/**
+ * Returns the typed password, or null for Cancel (osascript exits non-zero with
+ * error -128), a timeout (`giving up` returns empty text, exit 0; probed) or an
+ * empty answer. The error object is never read: it is not needed, and nothing
+ * about this dialog belongs in a message.
+ *
+ * Exactly ONE trailing newline (osascript's) is removed, never `trim()`: the
+ * value is the user's secret, and whitespace in it is the caller's to refuse,
+ * not this function's to edit.
+ */
+export async function promptForPassword(
+  origin: string,
+  username: string,
+  name: string,
+  run: DialogRunner = realRunner,
+): Promise<string | null> {
+  let out: string;
+  try {
+    out = run(buildSavePasswordDialogScript(origin, username, name));
+  } catch {
+    return null;
+  }
+  const pw = typeof out === "string" ? out.replace(/\r?\n$/, "") : "";
+  return pw.length > 0 ? pw : null;
+}
+
 export async function confirmInjection(
   boundOrigin: string,
   username: string,

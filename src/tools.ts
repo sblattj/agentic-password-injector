@@ -1,5 +1,5 @@
 import { CdpError, getLoaderId, getOrigin, resolveTarget, withConn, type Send } from "./cdp.ts";
-import { confirmInjection, confirmSecretInjection, dialogRequired } from "./consent.ts";
+import { confirmInjection, confirmSecretInjection, dialogRequired, promptForPassword } from "./consent.ts";
 import { PUBLIC_SUFFIXES } from "./domain.ts";
 import { decideGate } from "./gate.ts";
 import { VISIBLE_FN, detectLoginFields, inspectField, typeIntoField, type TypeOptions } from "./inject.ts";
@@ -7,7 +7,10 @@ import { originMatches } from "./origin.ts";
 import { SECRET_FORMATS, isSecretFormat, shape, type SecretFormat } from "./secret.ts";
 import { totpCode } from "./totp.ts";
 import { resolveCredential, type Resolved } from "./vault/index.ts";
-import { keychainHasTotp, keychainSecret, keychainTotpSeed, type SecretEntry } from "./vault/keychain.ts";
+import {
+  isStorablePassword, isStorableUsername, keychainExisting, keychainHasTotp, keychainSecret, keychainStore,
+  keychainTotpSeed, type NewCredential, type SecretEntry,
+} from "./vault/keychain.ts";
 import type { Cred } from "./vault/arc.ts";
 
 export interface ToolSchema { name: string; description: string; inputSchema: Record<string, unknown>; }
@@ -707,6 +710,89 @@ const EVENTS_PROP = {
     "keys off keyup and shows 'criteria not met' against a value that is actually correct.",
 } as const;
 
+// ── save_credential ──────────────────────────────────────────────────────────
+// The one WRITE tool. The model names the site, the user and the entry; a human
+// types the password into a native hidden-answer dialog; the value goes from that
+// dialog straight to `security -i` over a pipe. It is never returned, logged,
+// measured or masked, and it never lands on argv.
+
+export interface SaveDeps {
+  /** Attributes-only existence check. Never `-g` or `-w`. */
+  keychainExisting: (name: string) => { account: string | null } | null;
+  keychainStore: (c: NewCredential, opts: { replace?: { account: string | null } }) => void;
+  /** ALWAYS a real dialog: `APINJ_CONFIRM` does not apply, because only a human can type the secret. */
+  promptForPassword: (origin: string, username: string, name: string) => Promise<string | null>;
+}
+
+export const REAL_SAVE_DEPS: SaveDeps = {
+  keychainExisting: (name) => keychainExisting(name),
+  keychainStore: (c, opts) => keychainStore(c, opts),
+  promptForPassword: (origin, username, name) => promptForPassword(origin, username, name),
+};
+
+export type SaveResult =
+  | { saved: true; name: string; origin: string; username: string; backend: "keychain" }
+  | { saved: false; reason: string };
+
+const LOCAL_HTTP_HOSTS = new Set(["localhost", "127.0.0.1"]);
+
+/**
+ * The origin the new entry is BOUND to, normalised to `scheme://host[:port]`.
+ * https only, except plain http to the loopback names. Anything else is null.
+ * The result is ASCII with no spaces or quotes (WHATWG URL serialisation), so it
+ * survives `parseComment` unchanged.
+ */
+export function normalizeSaveOrigin(raw: unknown): string | null {
+  if (typeof raw !== "string" || !raw || raw.length > 2048) return null;
+  let u: URL;
+  try { u = new URL(raw); } catch { return null; }
+  if (u.protocol === "https:") { /* ok */ }
+  else if (u.protocol === "http:" && LOCAL_HTTP_HOSTS.has(u.hostname)) { /* ok */ }
+  else return null;
+  if (!u.hostname) return null;
+  const o = u.origin;
+  return /^[\x21-\x7e]+$/.test(o) && !/["\\]/.test(o) ? o : null;
+}
+
+export async function saveCredential(args: unknown, d: SaveDeps = REAL_SAVE_DEPS): Promise<SaveResult> {
+  const a = (args ?? {}) as { name?: unknown; origin?: unknown; username?: unknown; replace?: unknown };
+  const no = (reason: string): SaveResult => ({ saved: false, reason });
+
+  // 1. Validate everything BEFORE any dialog or keychain call.
+  const name = typeof a.name === "string" ? a.name : "";
+  if (!isValidSecretName(name)) return no("invalid_name");
+  const origin = normalizeSaveOrigin(a.origin);
+  if (!origin) return no("invalid_origin");
+  const username = typeof a.username === "string" ? a.username : "";
+  if (!isStorableUsername(username)) return no("invalid_username");
+  const replace = a.replace === true;
+
+  // 2. Refuse to overwrite unless asked. Attributes only.
+  let existing: { account: string | null } | null;
+  try { existing = d.keychainExisting(name); }
+  catch (e) { return no(vaultFailReason(e)); }
+  if (existing && !replace) return no("exists");
+
+  // 3. A human types the secret. Always.
+  let password: string | null;
+  try { password = await d.promptForPassword(origin, username, name); }
+  catch { password = null; }
+  if (password === null || password === "") return no("user_cancelled");
+  // Which rule failed (length, a tab, an accent, a trailing space) is NOT said:
+  // each one is a fact about a secret the model must not learn.
+  if (!isStorablePassword(password)) return no("password_unsupported");
+
+  // 4. Write. Any fault is a fixed reason; the error object is never read for text.
+  try {
+    d.keychainStore({ name, origin, username, password }, existing ? { replace: existing } : {});
+  } catch {
+    return no("vault_error");
+  }
+
+  // 5. Metadata only.
+  return { saved: true, name, origin, username, backend: "keychain" };
+}
+
 function register(name: string, description: string, inputSchema: Record<string, unknown>, fn: (args: unknown) => Promise<unknown>) {
   MANIFEST.push({ name, description, inputSchema });
   TOOLS[name] = fn;
@@ -791,4 +877,30 @@ register(
     additionalProperties: false,
   },
   (args) => fillSecret(args),
+);
+
+register(
+  "save_credential",
+  "Save a NEW login to the macOS Keychain as apinj:<name>, bound to <origin>, for <username>. The human " +
+  "types or pastes the password into a native hidden-answer dialog; the model never sees it, and it never " +
+  "appears in a return value, error, log, or command line. The dialog always appears. Afterwards " +
+  "login({domain, name}) finds it. Refuses an existing entry unless replace is true. Accepts printable " +
+  "ASCII passwords up to 1024 chars with no leading or trailing space. Returns only " +
+  "{saved, name, origin, username, backend} or {saved:false, reason}.",
+  {
+    type: "object",
+    properties: {
+      name: { type: "string", description: "Entry name ([a-z0-9][a-z0-9._-], max 64); stored as apinj:<name>" },
+      origin: {
+        type: "string",
+        description: "The site the login is bound to, e.g. https://example.com (http only for localhost/127.0.0.1). " +
+          "Normalised to scheme://host[:port].",
+      },
+      username: { type: "string", description: "Account name, 1-128 printable ASCII chars, no quotes or backslashes" },
+      replace: { type: "boolean", description: "Overwrite an existing apinj:<name> entry" },
+    },
+    required: ["name", "origin", "username"],
+    additionalProperties: false,
+  },
+  (args) => saveCredential(args),
 );

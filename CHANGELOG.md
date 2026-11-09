@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `save_credential {name, origin, username, replace?}` stores a new login in
+  the macOS Keychain as `apinj:<name>`, bound to the normalised origin. The
+  human types or pastes the password into a native hidden-answer dialog that
+  always appears (`APINJ_CONFIRM` does not apply); the value is written via
+  `security -i` on stdin, never argv, and never appears in a return value or
+  error. `login({domain, name})` finds the entry afterwards. Replacing an entry
+  with a different username leaves one item, not two. Passwords the Keychain
+  read path would mangle (non-printable or non-ASCII, leading or trailing
+  space, over 1024 chars) are refused with `password_unsupported`.
+
 ## [0.3.0] - 2026-10-29
 
 ### Added

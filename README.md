@@ -102,7 +102,7 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 
 ---
 
-## The five tools
+## The six tools
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
@@ -111,6 +111,7 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 | `login` | `tabId`, `domain` (required), `name?`, `submit?: boolean`, `events?` | `{ filled, submitted, reason? }` |
 | `fill_totp` | `tabId`, `domain` (required), `name?`, `selector?` | `{ filled, reason? }` |
 | `fill_secret` | `tabId`, `name` (required), `selector?`, `format?`, `events?` | `{ filled, reason? }` |
+| `save_credential` | `name`, `origin`, `username` (required), `replace?` | `{ saved, name, origin, username, backend }` or `{ saved: false, reason }` |
 
 - `tabId` is a **CDP target id** — always explicit, never "the active tab".
 - `domain` is the domain of the *saved credential* (`github.com`), and must be a registrable domain.
@@ -118,11 +119,14 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 - `login` is one origin check and **one** dialog for username + password (+ optional submit). `fill_credential` exists for identifier-first flows (Google, Microsoft) where the password field isn't on the page yet.
 - `fill_totp` reads the seed, computes the code, types it, and drops both. Neither is ever returned.
 - `fill_secret` types a **named non-credential secret** — an SSN, a freeze PIN, a date of birth, an account number. It takes no `domain`: the Keychain entry `apinj:<name>` *is* the lookup key, and its stored origin is the binding. See [named secrets](#9-named-secrets-are-a-narrower-capability-not-a-selector-api) below and `docs/keychain-setup.md`.
+- `save_credential` adds a Keychain login without the model ever seeing the password. The caller names the entry, the site and the username; a native macOS dialog with a **hidden** answer field asks the human to type or paste the password, and the value goes straight from that dialog to `security -i` over stdin (never argv, never a return value). The dialog **always** appears, whatever `APINJ_CONFIRM` says, because only a human can supply the secret. The entry is `apinj:<name>` bound to the normalised origin, so `login({ domain, name })` finds it afterwards. See `docs/keychain-setup.md`.
 - `events` fires a synthetic `keydown`/`keypress`/`keyup`/`change` burst after the insert. `Input.insertText` fires native `beforeinput`/`input` but **no keyboard events**, so a validator wired to `keyup` shows "criteria not met" against a value that is actually correct. Opt-in, because synthesising key events makes the page believe a human typed.
 
 Common `reason` codes: `origin_mismatch`, `user_denied`, `navigated_during_consent`, `no_origin_binding`, `not_found`, `vault_locked`, `vault_error`, `focus_lost`, `ambiguous_password_field`, `no_password_field`, `no_username_field`, `no_otp_field`, `no_totp`, `bad_domain`, `tab_unavailable`.
 
 `fill_secret` adds: `name_required`, `bad_name`, `bad_format`, `format_mismatch`, `selector_not_allowed`, `kind_not_allowed`, `field_not_visible`, `no_secret_field`, `ambiguous_secret_field`.
+
+`save_credential` returns: `invalid_name`, `invalid_origin`, `invalid_username` (refused before any dialog), `exists` (pass `replace: true` to overwrite), `user_cancelled` (Cancel, timeout, or an empty answer), `password_unsupported`, `vault_locked`, `vault_error`.
 
 ---
 
