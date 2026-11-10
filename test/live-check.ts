@@ -10,7 +10,7 @@
 // Requires a Chromium-family browser with a CDP port open. No secret is involved:
 // the value typed is a sentinel. It creates its own tab and closes it.
 //
-//   CDP_BASE=http://127.0.0.1:9333 bun run test/live-check.ts
+//   CDP_BASE=http://127.0.0.1:9222 bun run test/live-check.ts
 //
 // Live-browser verification of the page-world expressions. No secret involved:
 // the "value" typed is a sentinel string. Creates its own tab and closes it.

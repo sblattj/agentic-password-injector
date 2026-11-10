@@ -152,7 +152,7 @@ bun test          # 206 tests
 "/Applications/Arc.app/Contents/MacOS/Arc" --remote-debugging-port=9222
 ```
 
-The default is `http://127.0.0.1:9222`. A browser on a different port is pointed at with the `CDP_BASE` env var (e.g. `CDP_BASE=http://127.0.0.1:9333`); `CDP_TIMEOUT_MS` (default 15000) bounds each CDP command.
+The default is `http://127.0.0.1:9222`. A browser on a different port is pointed at with the `CDP_BASE` env var (e.g. `CDP_BASE=http://127.0.0.1:9223`); `CDP_TIMEOUT_MS` (default 15000) bounds each CDP command.
 
 **3. Register the MCP server.** With Claude Code:
 
