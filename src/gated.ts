@@ -1,4 +1,5 @@
 import type { CdpError, Send } from "./cdp.ts";
+import { ENDPOINT_REASONS } from "./endpoints.ts";
 import { decideGate } from "./gate.ts";
 import { originMatches } from "./origin.ts";
 
@@ -55,7 +56,12 @@ export async function gatedOnOrigin(
   run: (send: Send, guard: Guard) => Promise<FillResult>,
 ): Promise<FillResult> {
   let target: { wsUrl: string };
-  try { target = await d.resolveTarget(tabId); } catch { return fail("tab_unavailable"); }
+  try { target = await d.resolveTarget(tabId); } catch (e) {
+    // An endpoint refusal says WHY (wrong name, read-only browser, bad config);
+    // everything else, including a fetch failure, is still `tab_unavailable`.
+    const code = (e as { code?: string })?.code;
+    return fail(code && ENDPOINT_REASONS.has(code) ? code : "tab_unavailable");
+  }
 
   try {
     return await d.withConn(target.wsUrl, async (send) => {

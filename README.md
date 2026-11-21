@@ -95,6 +95,11 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 
 `fill_sms_code` and `fill_email_code` wait (at most 25 s) for the newest code that arrived after `since`, then type it into the one-time-code field. They use the same gate as `fill_totp`: the tab must match a **saved credential's** origin for `domain`, then consent, then a guard before the keystroke (`fillCode`, `src/tools.ts`). Messages are read only after consent. Messages comes from `~/Library/Messages/chat.db`, opened read-only (`messagesSource`, `src/codes/messages.ts`); email comes from Gmail's read-only API using an OAuth token file you point at with `APINJ_GMAIL_TOKEN_FILE` (`gmailSource`, `src/codes/gmail.ts`). The return is `{filled, reason?}` only: never the code, the message text or the sender. A number is only taken when a code keyword is near it, and a WebOTP line (`@host #code`) naming another host is skipped (`extractCode`, `src/codes/extract.ts`).
 
+
+### 12. A second browser is a name, never a URL
+
+With `CDP_ENDPOINTS` set, a `tabId` of `endpoint:<name>/<targetId>` reaches another browser's DevTools port. The model only picks a **name**; every URL comes from the server's environment, so a tool call cannot aim the server at a browser the operator did not configure (`resolveTabRef`, `src/endpoints.ts`). A bare id is looked up on the default browser only, never searched for elsewhere. An endpoint marked `?mode=read` is refused by every tool that takes a `tabId` (`endpoint_read_only`), and that refusal, like `unknown_endpoint`, happens **before** the vault is read or a dialog shown (`tabRefReason`). Past that point nothing changes: the origin gate, consent, loaderId guard and visibility checks run against the chosen browser exactly as they do against the default one.
+
 ---
 
 ## Non-goals and honest limitations
@@ -128,7 +133,7 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 | `fill_sms_code` | `tabId`, `domain` (required), `name?`, `selector?`, `since?`, `timeoutMs?`, `events?` | `{ filled, reason? }` |
 | `fill_email_code` | `tabId`, `domain` (required), `name?`, `selector?`, `since?`, `timeoutMs?`, `events?` | `{ filled, reason? }` |
 
-- `tabId` is a **CDP target id** — always explicit, never "the active tab".
+- `tabId` is a **CDP target id**, always explicit, never "the active tab". A bare id is a tab in the `CDP_BASE` browser. `endpoint:<name>/<targetId>` (cdp-toolkit's selector form) is a tab in a browser named in `CDP_ENDPOINTS`; see [Several browsers](#several-browsers-named-endpoints).
 - `domain` is the domain of the *saved credential* (`github.com`), and must be a registrable domain.
 - `name` selects a specific credential when several share a domain: a Vivaldi or Arc row whose username is `name`, or the Keychain entry stored under `apinj:<name>`. A supplied `name` that matches nothing is a miss, never a substitution — returning a different account would show the wrong username in the dialog.
 - `login` is one origin check and **one** dialog for username + password (+ optional submit). `fill_credential` exists for identifier-first flows (Google, Microsoft) where the password field isn't on the page yet.
@@ -139,7 +144,7 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 - `fill_sms_code` / `fill_email_code` take `domain` and `name?` like `fill_totp`: the saved credential is the origin binding. `since` is when the code was requested, in ms since epoch (default 60 s before the call, never more than 10 minutes back). The field is picked after the code arrives, the same way as `fill_totp`, or by `selector`.
 - `events` fires a synthetic `keydown`/`keypress`/`keyup`/`change` burst after the insert. `Input.insertText` fires native `beforeinput`/`input` but **no keyboard events**, so a validator wired to `keyup` shows "criteria not met" against a value that is actually correct. Opt-in, because synthesising key events makes the page believe a human typed.
 
-Common `reason` codes: `origin_mismatch`, `user_denied`, `navigated_during_consent`, `no_origin_binding`, `not_found`, `vault_locked`, `vault_error`, `focus_lost`, `ambiguous_password_field`, `no_password_field`, `no_username_field`, `no_otp_field`, `no_totp`, `bad_domain`, `tab_unavailable`.
+Common `reason` codes: `origin_mismatch`, `user_denied`, `navigated_during_consent`, `no_origin_binding`, `not_found`, `vault_locked`, `vault_error`, `focus_lost`, `ambiguous_password_field`, `no_password_field`, `no_username_field`, `no_otp_field`, `no_totp`, `bad_domain`, `tab_unavailable`, `unknown_endpoint`, `endpoint_read_only`, `endpoint_config_error`.
 
 `fill_secret` adds: `name_required`, `bad_name`, `bad_format`, `format_mismatch`, `selector_not_allowed`, `kind_not_allowed`, `field_not_visible`, `no_secret_field`, `ambiguous_secret_field`.
 
@@ -159,7 +164,7 @@ Common `reason` codes: `origin_mismatch`, `user_denied`, `navigated_during_conse
 git clone https://github.com/sblattj/agentic-password-injector.git
 cd agentic-password-injector
 bun install
-bun test          # 206 tests
+bun test          # 446 tests
 ```
 
 **2. Start a Chromium-family browser with a debug port:**
@@ -174,6 +179,21 @@ bun test          # 206 tests
 ```
 
 The default is `http://127.0.0.1:9222`. A browser on a different port is pointed at with the `CDP_BASE` env var (e.g. `CDP_BASE=http://127.0.0.1:9223`); `CDP_TIMEOUT_MS` (default 15000) bounds each CDP command.
+
+#### Several browsers (named endpoints)
+
+To fill into more than one browser, name the others in `CDP_ENDPOINTS`, the same variable and syntax [cdp-toolkit](https://github.com/sblattj/cdp-toolkit) uses, so one value can drive both:
+
+```sh
+CDP_ENDPOINTS="helium=http://127.0.0.1:9555,teams=http://127.0.0.1:9333?mode=read"
+```
+
+- Entries are comma-separated `name=url`. Names are letters, digits and `_`. URLs are `http://` or `https://`.
+- `CDP_BASE` (or `http://127.0.0.1:9222`) is the endpoint named `default`; a bare `tabId` always means it.
+- Address a tab in another browser as `endpoint:helium/<targetId>`, the id cdp-toolkit's `list_pages` shows for `endpoint:helium/`.
+- `?mode=read` marks a browser this server must never type into: every fill there returns `endpoint_read_only`. `?mode=write` (or no mode) is writable.
+- An unknown name returns `unknown_endpoint`; a malformed value returns `endpoint_config_error` for every call until it is fixed.
+- cdp-toolkit's `CDP_ENDPOINTS_FILE` is not read here; use the env string.
 
 **3. Register the MCP server.** With Claude Code:
 
@@ -269,7 +289,7 @@ A page can validate cosmetically and submit correctly, or the reverse. Before ac
 
 This works well alongside a general browser-driving MCP such as [cdp-toolkit](https://github.com/sblattj/cdp-toolkit) — the agent navigates and clicks with that, and calls this only for the password box. Two things to know:
 
-- **Both drive the same browser, over separate CDP connections.** This server does not share the other's socket or reuse its target resolution; point both at the same `CDP_BASE`.
+- **Both drive the same browser, over separate CDP connections.** This server does not share the other's socket or reuse its target resolution; point both at the same `CDP_BASE` (and the same `CDP_ENDPOINTS`, if you use more than one browser).
 - **This server always takes an explicit `tabId` and never acts on "the active tab."** That's deliberate: with two MCPs steering one browser, "active" is a race, and a race that picks the wrong tab is a password in the wrong page. Get the target id from your browser MCP's page listing and pass it in.
 
 ---

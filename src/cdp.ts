@@ -1,7 +1,9 @@
+import { resolveTabRef } from "./endpoints.ts";
+
 export class CdpError extends Error { constructor(public code: string, msg?: string) { super(msg ? `${code}: ${msg}` : code); } }
-// 9222 is the ecosystem-default Chromium remote-debugging port. A browser started
-// on a different port (e.g. 9223) is pointed at via the CDP_BASE env var.
-const BASE = process.env.CDP_BASE ?? "http://127.0.0.1:9222";
+// Which browser a tab lives in is decided per call by `resolveTabRef`: a bare id
+// is the CDP_BASE browser (default http://127.0.0.1:9222), `endpoint:<name>/<id>`
+// is a browser named in CDP_ENDPOINTS. See endpoints.ts.
 const TIMEOUT = Number(process.env.CDP_TIMEOUT_MS ?? 15000);
 interface RawTarget { id: string; type: string; url: string; webSocketDebuggerUrl?: string; }
 
@@ -10,9 +12,16 @@ export function parseTargets(list: RawTarget[], tabId: string): { wsUrl: string;
   if (!t) throw new CdpError("tab_unavailable", `no target with id ${tabId}`);
   return { wsUrl: t.webSocketDebuggerUrl!, url: t.url };
 }
+/**
+ * Find a tab's websocket. Throws `unknown_endpoint` / `endpoint_read_only` /
+ * `endpoint_config_error` (an EndpointError) before any network call, and
+ * `tab_unavailable` when the endpoint has no such target. Only the named
+ * endpoint is asked: a bare id is never searched for on another browser.
+ */
 export async function resolveTarget(tabId: string) {
-  const res = await fetch(`${BASE}/json/list`);
-  return parseTargets((await res.json()) as RawTarget[], tabId);
+  const { endpoint, targetId } = resolveTabRef(tabId);
+  const res = await fetch(`${endpoint.base}/json/list`);
+  return parseTargets((await res.json()) as RawTarget[], targetId);
 }
 export type Send = <T = any>(method: string, params?: Record<string, unknown>) => Promise<T>;
 

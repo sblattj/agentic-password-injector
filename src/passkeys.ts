@@ -1,6 +1,7 @@
 import { getLoaderId, getOrigin, resolveTarget, withConn, type CdpError, type Send } from "./cdp.ts";
 import { confirmKind, dialogRequired, type PromptKind } from "./consent.ts";
 import { fail, gatedOnOrigin, type FillResult, type GateDeps, type Guard } from "./gated.ts";
+import { tabRefReason } from "./endpoints.ts";
 import { normalizeSaveOrigin, isValidSecretName } from "./validate.ts";
 import { passkeyLookup, passkeyStore, type PasskeyEntry, type PasskeyRecord } from "./vault/passkey.ts";
 
@@ -148,7 +149,8 @@ export async function passkeyRegister(args: unknown, d: PasskeyDeps = REAL_PASSK
   const a = (args ?? {}) as { tabId?: unknown; name?: unknown; origin?: unknown; selector?: unknown; timeoutMs?: unknown; replace?: unknown };
   const no = (reason: string): RegisterResult => ({ saved: false, reason });
   const tabId = typeof a.tabId === "string" ? a.tabId : "";
-  if (!tabId) return no("tab_unavailable");
+  const tabRefused = tabRefReason(tabId);
+  if (tabRefused) return no(tabRefused);
   const name = typeof a.name === "string" ? a.name : "";
   if (!isValidSecretName(name)) return no("invalid_name");
   const origin = normalizeSaveOrigin(a.origin);
@@ -200,7 +202,8 @@ export async function passkeyLogin(args: unknown, d: PasskeyDeps = REAL_PASSKEY_
   const a = (args ?? {}) as { tabId?: unknown; name?: unknown; selector?: unknown; timeoutMs?: unknown };
   const no = (reason: string): LoginResult => ({ used: false, reason });
   const tabId = typeof a.tabId === "string" ? a.tabId : "";
-  if (!tabId) return no("tab_unavailable");
+  const tabRefused = tabRefReason(tabId);
+  if (tabRefused) return no(tabRefused);
   const name = typeof a.name === "string" ? a.name : "";
   if (!name) return no("name_required");
   if (!isValidSecretName(name)) return no("bad_name");
@@ -280,7 +283,7 @@ export const PASSKEY_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        tabId: { type: "string", description: "CDP target id of the tab" },
+        tabId: { type: "string", description: "CDP target id of the tab. A bare id is the CDP_BASE browser; `endpoint:<name>/<targetId>` is a browser named in CDP_ENDPOINTS (read-only endpoints refuse)" },
         name: { type: "string", description: "Entry name ([a-z0-9][a-z0-9._-], max 64); stored as apinj-passkey:<name>" },
         origin: { type: "string", description: "The site's origin, e.g. https://example.com; must match the tab" },
         selector: { type: "string", description: SELECTOR_DESC },
@@ -302,7 +305,7 @@ export const PASSKEY_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        tabId: { type: "string", description: "CDP target id of the tab" },
+        tabId: { type: "string", description: "CDP target id of the tab. A bare id is the CDP_BASE browser; `endpoint:<name>/<targetId>` is a browser named in CDP_ENDPOINTS (read-only endpoints refuse)" },
         name: { type: "string", description: "Entry name the passkey was registered under" },
         selector: { type: "string", description: SELECTOR_DESC },
         timeoutMs: { type: "number", description: TIMEOUT_DESC },

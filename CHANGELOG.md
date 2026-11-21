@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Named CDP endpoints: fill into more than one browser. `CDP_ENDPOINTS`
+  (`name=url,...`, cdp-toolkit's syntax) names extra DevTools ports, and a
+  `tabId` of `endpoint:<name>/<targetId>` targets a tab there. A bare id still
+  means the `CDP_BASE` browser and is never searched for elsewhere. An endpoint
+  marked `?mode=read` refuses every fill with `endpoint_read_only`; an unknown
+  name is `unknown_endpoint`; a malformed value is `endpoint_config_error`. All
+  three are decided before the vault is read. The origin gate, consent,
+  loaderId guard and visibility checks run unchanged on every endpoint.
+  Fixes #4.
+
 ## [0.5.0] - 2026-11-20
 
 ### Added

@@ -8,6 +8,7 @@ import { extractCode } from "./codes/extract.ts";
 import { gmailSource } from "./codes/gmail.ts";
 import { messagesSource } from "./codes/messages.ts";
 import type { CodeSource } from "./codes/types.ts";
+import { tabRefReason } from "./endpoints.ts";
 import { GateAbort, fail, gatedOnOrigin, type FillResult, type Guard } from "./gated.ts";
 import { VISIBLE_FN, detectLoginFields, inspectField, typeIntoField, type TypeOptions } from "./inject.ts";
 import { SECRET_FORMATS, isSecretFormat, shape, type SecretFormat } from "./secret.ts";
@@ -174,7 +175,8 @@ async function gated(
   const tabId = typeof args.tabId === "string" ? args.tabId : "";
   const domain = typeof args.domain === "string" ? args.domain : "";
   const name = typeof args.name === "string" ? args.name : undefined;
-  if (!tabId) return fail("tab_unavailable");
+  const tabRefused = tabRefReason(tabId);
+  if (tabRefused) return fail(tabRefused);
   // A MISSING argument and a BAD argument are different mistakes, and neither is
   // `not_found` — that reads as "no such credential" and sends the caller hunting
   // for a vault entry that was never the problem.
@@ -521,7 +523,8 @@ export async function fillSecret(args: unknown, d: Deps = REAL_DEPS): Promise<Fi
   const selector = typeof a.selector === "string" && a.selector ? a.selector : null;
   const events = Boolean(a.events);
 
-  if (!tabId) return fail("tab_unavailable");
+  const tabRefused = tabRefReason(tabId);
+  if (tabRefused) return fail(tabRefused);
   // `name` is the vault key here, the way `domain` is for a credential. Missing
   // and malformed are different mistakes, and neither is `not_found`.
   if (!name) return fail("name_required");
@@ -700,7 +703,7 @@ export const fillEmailCode = (args: unknown, d: Deps = REAL_DEPS, c: CodeDeps = 
 
 // ── Registration ─────────────────────────────────────────────────────────────
 const TAB = {
-  tabId: { type: "string", description: "CDP target id of the tab to inject into" },
+  tabId: { type: "string", description: "CDP target id of the tab to inject into. A bare id is the CDP_BASE browser; `endpoint:<name>/<targetId>` is a browser named in CDP_ENDPOINTS (read-only endpoints refuse)" },
   domain: { type: "string", description: "Domain of the saved credential, e.g. github.com" },
   name: { type: "string", description: "Optional Keychain entry name when several credentials share a domain" },
 } as const;
