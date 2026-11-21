@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-20
+
+### Added
+
+- `passkey_register` and `passkey_login`: agent passkeys through the CDP
+  `WebAuthn` domain. A virtual authenticator (CTAP2, internal, resident key,
+  user verification) is attached to that one tab for the ceremony and removed
+  afterwards, so your own passkeys are never touched. The private key, credential
+  id, rpId, user handle and sign count are stored in the Keychain as
+  `apinj-passkey:<name>`, bound to the origin, written over `security -i` stdin.
+  Sign-in uses the same origin gate and consent as the password tools, reads the
+  key only after both pass, and saves the new sign count. Results never carry the
+  key. The tab must be visible (`tab_not_visible` otherwise). Fixes #2.
+- `fill_sms_code` and `fill_email_code`: wait (default 20 s, max 25 s) for the
+  newest one-time code that arrived after `since`, from Messages (`chat.db`,
+  read-only, including `attributedBody`-only rows) or Gmail (read-only API,
+  token file from `APINJ_GMAIL_TOKEN_FILE`), and type it into the one-time-code
+  field after the same origin gate and consent as `fill_totp`. Returns only
+  `{filled, reason?}`, never the code, message or sender. Missing Full Disk
+  Access is `messages_access_denied`; no Gmail token is
+  `email_source_unavailable`. A bare number with no code keyword nearby is
+  never taken, and a WebOTP line (`@host #code`) for another host is skipped.
+  Fixes #3.
+
 ## [0.4.0] - 2026-11-09
 
 ### Added
