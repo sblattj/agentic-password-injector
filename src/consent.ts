@@ -1,7 +1,58 @@
 // src/consent.ts
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { requestCancelled, requestSignal } from "./request.ts";
 
-export type DialogRunner = (script: string) => string;
+/**
+ * Shows one dialog and returns what osascript printed. May be async: the real
+ * runner is (issue #1), so the server keeps answering `tools/list` and health
+ * checks while a human looks at the prompt.
+ */
+export type DialogRunner = (script: string, signal?: AbortSignal) => string | Promise<string>;
+
+/**
+ * What the human did with an Allow/Deny prompt. `timeout` is the dialog giving
+ * up on its own; `cancelled` is the MCP request going away while it was open.
+ * Only `allow` lets a fill proceed.
+ */
+export type ConsentOutcome = "allow" | "deny" | "timeout" | "cancelled";
+
+/**
+ * How long an Allow/Deny dialog waits before giving up, in seconds (issue #1).
+ *
+ * Default 25: below the ~30 s many MCP gateways and proxies allow a backend tool
+ * call, so an unanswered prompt comes back as a clean `consent_timeout` instead
+ * of a transport error. `APINJ_CONSENT_TIMEOUT_S` overrides it (a whole number,
+ * 1 to 600); anything else falls back to the default. The value is parsed to an
+ * integer before it reaches the AppleScript, so env text is never interpolated.
+ * Read on every call, like `dialogRequired`.
+ */
+export const CONSENT_TIMEOUT_DEFAULT_S = 25;
+export const CONSENT_TIMEOUT_MAX_S = 600;
+
+export function consentTimeoutS(env: Record<string, string | undefined> = process.env): number {
+  const raw = (env.APINJ_CONSENT_TIMEOUT_S ?? "").trim();
+  if (!/^\d{1,4}$/.test(raw)) return CONSENT_TIMEOUT_DEFAULT_S;
+  const n = Number(raw);
+  return n >= 1 && n <= CONSENT_TIMEOUT_MAX_S ? n : CONSENT_TIMEOUT_DEFAULT_S;
+}
+
+/** Maps osascript's output to an outcome. `gave up:true` is what `giving up after N` prints. */
+export function parseConsent(out: unknown): ConsentOutcome {
+  const s = typeof out === "string" ? out : "";
+  if (/button returned:Allow/.test(s)) return "allow";
+  if (/gave up:true/.test(s)) return "timeout";
+  return "deny";
+}
+
+async function ask(script: string, run: DialogRunner): Promise<ConsentOutcome> {
+  try {
+    const out = await run(script, requestSignal());
+    // The answer arrived, but the caller is already gone: a late Allow is dropped.
+    return requestCancelled() ? "cancelled" : parseConsent(out);
+  } catch {
+    return requestCancelled() ? "cancelled" : "deny";
+  }
+}
 
 /**
  * The host the user is actually authorising. Derived from the credential's BOUND
@@ -45,7 +96,7 @@ export function buildDialogScript(boundOrigin: string, username: string, request
   // shown only as trailing context, so a mismatch is visible rather than hidden.
   const requested = safeRequestedDomain(requestedDomain);
   const context = requested && requested !== host.toLowerCase() ? ` (requested as ${esc(requested)})` : "";
-  return `display dialog "Fill ${esc(host)} login for ${esc(username)}?${context}" buttons {"Deny","Allow"} default button "Deny" with title "agentic-password-injector" giving up after 60`;
+  return `display dialog "Fill ${esc(host)} login for ${esc(username)}?${context}" buttons {"Deny","Allow"} default button "Deny" with title "agentic-password-injector" giving up after ${consentTimeoutS()}`;
 }
 
 /**
@@ -81,7 +132,7 @@ export function buildSecretDialogScript(boundOrigin: string, secretName?: string
   const host = boundHost(boundOrigin);
   const name = safeSecretName(secretName);
   const what = name ? `secret '${esc(name)}'` : "a saved secret";
-  return `display dialog "Type ${what} into ${esc(host)}?" buttons {"Deny","Allow"} default button "Deny" with title "agentic-password-injector" giving up after 60`;
+  return `display dialog "Type ${what} into ${esc(host)}?" buttons {"Deny","Allow"} default button "Deny" with title "agentic-password-injector" giving up after ${consentTimeoutS()}`;
 }
 
 /**
@@ -102,7 +153,7 @@ export function buildKindDialogScript(kind: PromptKind, boundOrigin: string, ent
     kind === "passkey_login" ? `Sign in to ${host} with the agent passkey${entry}?` :
     kind === "sms_code" ? `Type the newest text-message code into ${host}?` :
     `Type the newest email code into ${host}?`;
-  return `display dialog "${text}" buttons {"Deny","Allow"} default button "Deny" with title "agentic-password-injector" giving up after 60`;
+  return `display dialog "${text}" buttons {"Deny","Allow"} default button "Deny" with title "agentic-password-injector" giving up after ${consentTimeoutS()}`;
 }
 
 export async function confirmKind(
@@ -110,12 +161,8 @@ export async function confirmKind(
   boundOrigin: string,
   entryName?: string,
   run: DialogRunner = realRunner,
-): Promise<boolean> {
-  try {
-    return /button returned:Allow/.test(run(buildKindDialogScript(kind, boundOrigin, entryName)));
-  } catch {
-    return false;
-  }
+): Promise<ConsentOutcome> {
+  return ask(buildKindDialogScript(kind, boundOrigin, entryName), run);
 }
 
 /**
@@ -130,7 +177,28 @@ export function dialogRequired(env: Record<string, string | undefined> = process
   return /^(1|true|yes|on)$/i.test((env.APINJ_CONFIRM ?? "").trim());
 }
 
-const realRunner: DialogRunner = (s) => execFileSync("osascript", ["-e", s], { encoding: "utf8" });
+/**
+ * The real dialog: `osascript`, run ASYNC (issue #1). `execFileSync` froze the
+ * event loop for as long as the dialog was up, so the server could not answer
+ * `tools/list` or a health probe and a gateway marked it unhealthy.
+ *
+ * On abort (the MCP request was cancelled, or the transport closed) the child
+ * is killed, which takes its dialog down with it, and the call rejects; the
+ * callers map that to `cancelled`. A backstop timeout a little past the
+ * script's own `giving up after N` kills a child that never returns.
+ */
+export function osascriptRunner(bin = "osascript"): DialogRunner {
+  return (script, signal) => new Promise<string>((ok, err) => {
+    const m = script.match(/giving up after (\d+)/);
+    const backstopMs = ((m ? Number(m[1]) : CONSENT_TIMEOUT_DEFAULT_S) + 10) * 1000;
+    execFile(bin, ["-e", script], { encoding: "utf8", signal, timeout: backstopMs, killSignal: "SIGKILL" }, (e, stdout) => {
+      // The error object is never read: for the save dialog it sits next to a secret.
+      if (e) err(new Error("dialog_failed")); else ok(stdout);
+    });
+  });
+}
+
+const realRunner: DialogRunner = osascriptRunner();
 
 /**
  * The `save_credential` prompt: a human types (or pastes) the password into a
@@ -176,7 +244,7 @@ export async function promptForPassword(
 ): Promise<string | null> {
   let out: string;
   try {
-    out = run(buildSavePasswordDialogScript(origin, username, name));
+    out = await run(buildSavePasswordDialogScript(origin, username, name), requestSignal());
   } catch {
     return null;
   }
@@ -189,22 +257,14 @@ export async function confirmInjection(
   username: string,
   requestedDomain?: string,
   run: DialogRunner = realRunner,
-): Promise<boolean> {
-  try {
-    return /button returned:Allow/.test(run(buildDialogScript(boundOrigin, username, requestedDomain)));
-  } catch {
-    return false;
-  }
+): Promise<ConsentOutcome> {
+  return ask(buildDialogScript(boundOrigin, username, requestedDomain), run);
 }
 
 export async function confirmSecretInjection(
   boundOrigin: string,
   secretName: string,
   run: DialogRunner = realRunner,
-): Promise<boolean> {
-  try {
-    return /button returned:Allow/.test(run(buildSecretDialogScript(boundOrigin, secretName)));
-  } catch {
-    return false;
-  }
+): Promise<ConsentOutcome> {
+  return ask(buildSecretDialogScript(boundOrigin, secretName), run);
 }

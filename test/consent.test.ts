@@ -9,10 +9,10 @@ test("script names the bound host + username, never a password field", () => {
   expect(s.toLowerCase()).not.toContain("password:");
 });
 
-test("Allow => true", async () => expect(await confirmInjection("https://x.com", "u", "x.com", () => "button returned:Allow")).toBe(true));
-test("Deny => false", async () => expect(await confirmInjection("https://x.com", "u", "x.com", () => "button returned:Deny")).toBe(false));
-test("osascript throw (cancel/timeout) => false", async () => {
-  expect(await confirmInjection("https://x.com", "u", "x.com", () => { throw new Error("128"); })).toBe(false);
+test("Allow => allow", async () => expect(await confirmInjection("https://x.com", "u", "x.com", () => "button returned:Allow")).toBe("allow"));
+test("Deny => deny", async () => expect(await confirmInjection("https://x.com", "u", "x.com", () => "button returned:Deny")).toBe("deny"));
+test("osascript throw => deny", async () => {
+  expect(await confirmInjection("https://x.com", "u", "x.com", () => { throw new Error("128"); })).toBe("deny");
 });
 
 // ── Fix round 2, item 3: the prompt names the AUTHORITATIVE origin ───────────
@@ -133,9 +133,9 @@ test("the secret dialog never shows the value, only the entry name", () => {
 });
 
 test("Allow => true, Deny => false, osascript throw => false", async () => {
-  expect(await confirmSecretInjection("https://x.com", "ssn", () => "button returned:Allow")).toBe(true);
-  expect(await confirmSecretInjection("https://x.com", "ssn", () => "button returned:Deny")).toBe(false);
-  expect(await confirmSecretInjection("https://x.com", "ssn", () => { throw new Error("128"); })).toBe(false);
+  expect(await confirmSecretInjection("https://x.com", "ssn", () => "button returned:Allow")).toBe("allow");
+  expect(await confirmSecretInjection("https://x.com", "ssn", () => "button returned:Deny")).toBe("deny");
+  expect(await confirmSecretInjection("https://x.com", "ssn", () => { throw new Error("128"); })).toBe("deny");
 });
 
 test("an injected instruction in the entry name never reaches the dialog", () => {

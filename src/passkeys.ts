@@ -1,5 +1,5 @@
 import { getLoaderId, getOrigin, resolveTarget, withConn, type CdpError, type Send } from "./cdp.ts";
-import { confirmKind, dialogRequired, type PromptKind } from "./consent.ts";
+import { type ConsentOutcome, confirmKind, consentTimeoutS, dialogRequired, type PromptKind } from "./consent.ts";
 import { fail, gatedOnOrigin, type FillResult, type GateDeps, type Guard } from "./gated.ts";
 import { tabRefReason } from "./endpoints.ts";
 import { normalizeSaveOrigin, isValidSecretName } from "./validate.ts";
@@ -28,7 +28,7 @@ import { passkeyLookup, passkeyStore, type PasskeyEntry, type PasskeyRecord } fr
 export interface PasskeyDeps extends GateDeps {
   lookup: (name: string) => PasskeyEntry | null;
   store: (name: string, origin: string, rec: PasskeyRecord, opts: { replace?: { rpId: string } }) => void;
-  confirm: (kind: PromptKind, origin: string, name: string) => Promise<boolean>;
+  confirm: (kind: PromptKind, origin: string, name: string) => Promise<boolean | ConsentOutcome>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
 }
@@ -157,6 +157,8 @@ export async function passkeyRegister(args: unknown, d: PasskeyDeps = REAL_PASSK
   if (!origin) return no("invalid_origin");
   const selector = typeof a.selector === "string" && a.selector ? a.selector : null;
   const wait = clampWait(a.timeoutMs);
+  // Shared with the consent dialog (issue #1): see `callDeadline` in tools.ts:fillCode.
+  const callDeadline = d.now() + Math.max(wait, consentTimeoutS() * 1000);
 
   let existing: PasskeyEntry | null;
   try { existing = d.lookup(name); } catch (e) { return no(refuseOr(e, "vault_error")); }
@@ -168,7 +170,7 @@ export async function passkeyRegister(args: unknown, d: PasskeyDeps = REAL_PASSK
       if (!(await tabVisible(send))) return fail("tab_not_visible");
       return await withAuthenticator(send, async (authId) => {
         await trigger(send, guard, selector);
-        const deadline = d.now() + wait;
+        const deadline = Math.min(d.now() + wait, callDeadline);
         for (;;) {
           const c = (await credentials(send, authId)).find((x) => x.rpId && rpIdFits(origin, x.rpId));
           if (c) {
@@ -209,6 +211,8 @@ export async function passkeyLogin(args: unknown, d: PasskeyDeps = REAL_PASSKEY_
   if (!isValidSecretName(name)) return no("bad_name");
   const selector = typeof a.selector === "string" && a.selector ? a.selector : null;
   const wait = clampWait(a.timeoutMs);
+  // Shared with the consent dialog (issue #1): see `callDeadline` in tools.ts:fillCode.
+  const callDeadline = d.now() + Math.max(wait, consentTimeoutS() * 1000);
 
   let entry: PasskeyEntry | null;
   try { entry = d.lookup(name); } catch (e) { return no(refuseOr(e, "vault_error")); }
@@ -239,7 +243,7 @@ export async function passkeyLogin(args: unknown, d: PasskeyDeps = REAL_PASSKEY_
         const keep = { ...rec! };
         rec = null;
         await trigger(send, guard, selector);
-        const deadline = d.now() + wait;
+        const deadline = Math.min(d.now() + wait, callDeadline);
         for (;;) {
           const c = (await credentials(send, authId)).find((x) => x.credentialId === credentialId);
           if (c && c.signCount > before) {

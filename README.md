@@ -34,7 +34,7 @@ That comparison happens **before** `confirmInjection` is called, so a mismatched
 
 ### 3. The origin is re-asserted immediately before every keystroke (the TOCTOU close)
 
-The consent dialog blocks for up to 60 seconds. In that window the tab can be navigated away — by a page timer, a meta-refresh, a subframe navigating the top, or, most directly, the same prompt-injected model calling `navigate_page` through its own browser MCP. You truthfully approved `mybank.com`; the password lands on `evil.com`.
+The consent dialog stays open for up to `APINJ_CONSENT_TIMEOUT_S` seconds (default 25). In that window the tab can be navigated away: by a page timer, a meta-refresh, a subframe navigating the top, or, most directly, the same prompt-injected model calling `navigate_page` through its own browser MCP. You truthfully approved `mybank.com`; the password lands on `evil.com`.
 
 So a `Guard` (`src/tools.ts`) re-reads **both** the live origin **and** the main frame's `loaderId` (`getLoaderId`, `src/cdp.ts` — a browser-side identity for the current document load, read from the `Page` domain rather than from page-world JS) and runs immediately before *every* keystroke, not once before the pair. A same-origin string can survive a navigation, but any top-level document commit mints a new `loaderId`; both must be unchanged or the fill aborts with `navigated_during_consent`, having typed nothing.
 
@@ -46,7 +46,17 @@ Both facts are also required to be *knowable*: an empty `loaderId` fails closed 
 
 **Off by default: fills are auto-approved.** The origin binding (§1, §2, §5) and the per-keystroke guard (§3) still run on every fill; only the human prompt is skipped. Set `APINJ_CONFIRM=1` (also `true`/`yes`/`on`) in the server's env to turn the dialog back on, for both logins and named secrets (`dialogRequired`, `src/consent.ts`).
 
-With it on, each fill raises a real macOS dialog (`buildDialogScript` / `confirmInjection`, `src/consent.ts`) showing the **bound host and the username** — never the password. It defaults to **Deny**, and anything other than an explicit Allow (including the 60-second timeout and any osascript failure) is a denial. The caller-supplied domain is unauthenticated text, so it is rendered only as trailing context and only when it is domain-shaped and under 64 chars (`safeRequestedDomain`) — otherwise the dialog shows the vault-derived origin alone, so a caller can't pad the prompt or talk you into clicking Allow.
+With it on, each fill raises a real macOS dialog (`buildDialogScript` / `confirmInjection`, `src/consent.ts`) showing the **bound host and the username**, never the password. It defaults to **Deny**, and anything other than an explicit Allow (including the timeout and any osascript failure) means nothing is typed. The caller-supplied domain is unauthenticated text, so it is rendered only as trailing context and only when it is domain-shaped and under 64 chars (`safeRequestedDomain`); otherwise the dialog shows the vault-derived origin alone, so a caller can't pad the prompt or talk you into clicking Allow.
+
+#### The dialog and MCP gateway timeouts
+
+A gateway or proxy in front of the server (ToolHive, an MCP router) usually cancels a backend tool call after about 30 seconds. Three things keep the dialog inside that limit (issue #1):
+
+- **The dialog gives up after 25 seconds by default**, below the common 30 s limit, and an unanswered prompt returns `{filled: false, reason: "consent_timeout"}` instead of a transport error. Set `APINJ_CONSENT_TIMEOUT_S` (a whole number, 1 to 600) to change it; keep it a few seconds under your client's or gateway's tool-call timeout (`consentTimeoutS`, `src/consent.ts`).
+- **The dialog never blocks the server.** `osascript` runs as an async child (`osascriptRunner`, `src/consent.ts`), so `tools/list`, health checks and other calls are answered while the prompt is up.
+- **A late Allow is dropped.** Each `tools/call` carries its MCP abort signal (`src/request.ts`), which the SDK fires on `notifications/cancelled` or when the transport closes. On abort the dialog process is killed, and the gate checks the signal after consent and again before every keystroke, so an Allow that arrives after the caller has gone types nothing (`request_cancelled`). A gateway that drops a call without sending a cancel is covered by the timeout above: the dialog gives up before the caller does.
+
+`fill_sms_code`, `fill_email_code` and the passkey tools wait for something after consent. That wait shares one budget with the dialog (the larger of `timeoutMs` and the consent timeout, counted from the start of the call), so a slow Allow followed by a full wait cannot outlive the gateway either. The `save_credential` dialog keeps its own 120 s limit, because a human has to find and paste a password; behind a 30 s gateway, answer it promptly or raise the gateway's timeout for that call.
 
 ### 5. Keychain credentials fail closed with no stored origin
 
@@ -144,7 +154,7 @@ With `CDP_ENDPOINTS` set, a `tabId` of `endpoint:<name>/<targetId>` reaches anot
 - `fill_sms_code` / `fill_email_code` take `domain` and `name?` like `fill_totp`: the saved credential is the origin binding. `since` is when the code was requested, in ms since epoch (default 60 s before the call, never more than 10 minutes back). The field is picked after the code arrives, the same way as `fill_totp`, or by `selector`.
 - `events` fires a synthetic `keydown`/`keypress`/`keyup`/`change` burst after the insert. `Input.insertText` fires native `beforeinput`/`input` but **no keyboard events**, so a validator wired to `keyup` shows "criteria not met" against a value that is actually correct. Opt-in, because synthesising key events makes the page believe a human typed.
 
-Common `reason` codes: `origin_mismatch`, `user_denied`, `navigated_during_consent`, `no_origin_binding`, `not_found`, `vault_locked`, `vault_error`, `focus_lost`, `ambiguous_password_field`, `no_password_field`, `no_username_field`, `no_otp_field`, `no_totp`, `bad_domain`, `tab_unavailable`, `unknown_endpoint`, `endpoint_read_only`, `endpoint_config_error`.
+Common `reason` codes: `origin_mismatch`, `user_denied`, `consent_timeout` (the dialog gave up), `request_cancelled` (the caller cancelled or disconnected before the keystroke), `navigated_during_consent`, `no_origin_binding`, `not_found`, `vault_locked`, `vault_error`, `focus_lost`, `ambiguous_password_field`, `no_password_field`, `no_username_field`, `no_otp_field`, `no_totp`, `bad_domain`, `tab_unavailable`, `unknown_endpoint`, `endpoint_read_only`, `endpoint_config_error`.
 
 `fill_secret` adds: `name_required`, `bad_name`, `bad_format`, `format_mismatch`, `selector_not_allowed`, `kind_not_allowed`, `field_not_visible`, `no_secret_field`, `ambiguous_secret_field`.
 
@@ -212,6 +222,7 @@ args = ["/path/to/agentic-password-injector/src/mcp.ts"]
 [servers."agentic-password-injector".env]
 CDP_BASE = "http://127.0.0.1:9222"
 # APINJ_CONFIRM = "1"   # opt in to an Allow/Deny dialog per fill (default: auto-approve)
+# APINJ_CONSENT_TIMEOUT_S = "25"   # dialog gives up after this many seconds; keep it under the gateway timeout
 ```
 
 No secrets belong in that file — the server reads them from the vault at use time.

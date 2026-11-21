@@ -1,5 +1,5 @@
 import { type CdpError, getLoaderId, getOrigin, resolveTarget, withConn, type Send } from "./cdp.ts";
-import { confirmInjection, confirmSecretInjection, dialogRequired, promptForPassword } from "./consent.ts";
+import { type ConsentOutcome, confirmInjection, confirmSecretInjection, consentTimeoutS, dialogRequired, promptForPassword } from "./consent.ts";
 import { PUBLIC_SUFFIXES } from "./domain.ts";
 import { isValidSecretName, normalizeSaveOrigin } from "./validate.ts";
 import { PASSKEY_TOOLS } from "./passkeys.ts";
@@ -37,9 +37,9 @@ export interface Deps {
   /** Keychain-only, by NAME. A named secret must never resolve through a browser store — see `fillSecret`. */
   resolveSecret: (name: string) => Promise<SecretEntry | null>;
   /** Prompts with the credential's BOUND origin; the caller domain is context only. */
-  confirmInjection: (boundOrigin: string, username: string, requestedDomain: string) => Promise<boolean>;
+  confirmInjection: (boundOrigin: string, username: string, requestedDomain: string) => Promise<boolean | ConsentOutcome>;
   /** Prompts with the BOUND origin and the entry name — what is typed, and where. */
-  confirmSecret: (boundOrigin: string, secretName: string) => Promise<boolean>;
+  confirmSecret: (boundOrigin: string, secretName: string) => Promise<boolean | ConsentOutcome>;
   detectLoginFields: (send: Send) => Promise<{ user?: string; pass?: string; ambiguous?: boolean }>;
   /** `guard` is re-asserted INSIDE, immediately before the keystroke (M3). */
   typeIntoField: (send: Send, selector: string, value: string, guard?: Guard, opts?: TypeOptions) => Promise<void>;
@@ -153,8 +153,9 @@ function vaultFailReason(e: unknown): string {
  * not be able to make the user answer a prompt about someone else's domain.
  *
  * INVARIANT #1b (C1): the check is repeated immediately before EVERY keystroke.
- * `confirmInjection` is a blocking osascript dialog with `giving up after 60`, so
- * a single pre-dialog check leaves a ~60-second window in which the tab can be
+ * `confirmInjection` is an osascript dialog that waits up to
+ * `APINJ_CONSENT_TIMEOUT_S` (default 25 s), so a single pre-dialog check leaves
+ * a window of that length in which the tab can be
  * navigated away — by a page timer, a meta-refresh, a frame navigating the top,
  * or, most directly, the same prompt-injected model issuing `navigate_page`
  * through its own browser MCP. The user truthfully approved `mybank.com`; the
@@ -170,7 +171,7 @@ async function gated(
   d: Deps,
   args: { tabId?: unknown; domain?: unknown; name?: unknown },
   run: (send: Send, cred: Cred, guard: Guard) => Promise<FillResult>,
-  consent?: (cred: Cred) => Promise<boolean>,
+  consent?: (cred: Cred) => Promise<boolean | ConsentOutcome>,
 ): Promise<FillResult> {
   const tabId = typeof args.tabId === "string" ? args.tabId : "";
   const domain = typeof args.domain === "string" ? args.domain : "";
@@ -620,7 +621,7 @@ export interface CodeDeps {
   email: () => CodeSource;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
-  confirm: (kind: "sms_code" | "email_code", origin: string) => Promise<boolean>;
+  confirm: (kind: "sms_code" | "email_code", origin: string) => Promise<boolean | ConsentOutcome>;
 }
 
 export const REAL_CODE_DEPS: CodeDeps = {
@@ -658,6 +659,11 @@ async function fillCode(kind: "sms" | "email", args: unknown, d: Deps, c: CodeDe
   const rawWait = typeof a.timeoutMs === "number" && Number.isFinite(a.timeoutMs) ? a.timeoutMs : CODE_WAIT_DEFAULT_MS;
   const wait = Math.min(CODE_WAIT_MAX_MS, Math.max(0, Math.floor(rawWait)));
   const promptKind = kind === "sms" ? "sms_code" : "email_code";
+  // One time budget for the whole call (issue #1): the code wait shares it with
+  // the consent dialog, so a slow Allow followed by a full wait cannot outlive a
+  // gateway's ~30 s call timeout. With no dialog, consent is instant and the
+  // whole `wait` is available.
+  const callDeadline = c.now() + Math.max(wait, consentTimeoutS() * 1000);
 
   return gated(d, (args ?? {}) as any, async (send, cred, guard) => {
     let host: string;
@@ -668,7 +674,7 @@ async function fillCode(kind: "sms" | "email", args: unknown, d: Deps, c: CodeDe
     catch (e) { const code = (e as CdpError)?.code; return fail(SOURCE_REASONS.has(code) ? code : "source_error"); }
 
     let code: string | null = null;
-    const deadline = c.now() + wait;
+    const deadline = Math.min(c.now() + wait, callDeadline);
     for (;;) {
       let msgs;
       try { msgs = await src.fetchSince(since); }

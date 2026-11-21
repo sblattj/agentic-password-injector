@@ -2,6 +2,8 @@ import type { CdpError, Send } from "./cdp.ts";
 import { ENDPOINT_REASONS } from "./endpoints.ts";
 import { decideGate } from "./gate.ts";
 import { originMatches } from "./origin.ts";
+import type { ConsentOutcome } from "./consent.ts";
+import { requestCancelled } from "./request.ts";
 
 // The origin gate shared by every injecting tool. Split out of tools.ts so the
 // passkey and one-time-code tools get these guarantees verbatim, without an
@@ -37,7 +39,19 @@ export type Guard = () => Promise<void>;
 // Reason codes raised as exceptions from inside `run` that must survive the outer
 // catch verbatim instead of collapsing to `tab_unavailable` — the user needs to
 // see WHY nothing was typed.
-export const PASSTHROUGH_REASONS = new Set(["focus_lost", "navigated_during_consent"]);
+export const PASSTHROUGH_REASONS = new Set(["focus_lost", "navigated_during_consent", "request_cancelled"]);
+
+/**
+ * A consent callback answers with an outcome, or a plain boolean (auto-approve
+ * returns `true`; test doubles return either). Only `allow` / `true` proceeds.
+ */
+export type Consent = () => Promise<boolean | ConsentOutcome>;
+
+function outcomeOf(v: boolean | ConsentOutcome): ConsentOutcome {
+  if (v === true) return "allow";
+  if (v === false) return "deny";
+  return v === "allow" || v === "timeout" || v === "cancelled" ? v : "deny";
+}
 
 /**
  * Everything after "which secret" is settled: connect, origin-check, consent,
@@ -52,7 +66,7 @@ export async function gatedOnOrigin(
   d: GateDeps,
   tabId: string,
   savedOrigin: string,
-  consent: () => Promise<boolean>,
+  consent: Consent,
   run: (send: Send, guard: Guard) => Promise<FillResult>,
 ): Promise<FillResult> {
   let target: { wsUrl: string };
@@ -84,6 +98,9 @@ export async function gatedOnOrigin(
        * is the same load it was when they authorised it.
        */
       const guard: Guard = async () => {
+        // The caller is gone (cancelled, or the transport closed): nothing it
+        // asked for may still be typed (issue #1).
+        if (requestCancelled()) throw new GateAbort("request_cancelled");
         let liveOrigin: string;
         let liveLoader: string;
         try {
@@ -98,11 +115,13 @@ export async function gatedOnOrigin(
         }
       };
 
-      const allow = await consent();
-      const g = decideGate({ tabOrigin, savedOrigin, allow });
-      if (!g.ok) return fail(g.reason);
+      const outcome = outcomeOf(await consent());
+      // A late Allow after the caller went away is dropped, not typed (issue #1).
+      if (outcome === "cancelled" || requestCancelled()) return fail("request_cancelled");
+      const g = decideGate({ tabOrigin, savedOrigin, allow: outcome === "allow" });
+      if (!g.ok) return fail(g.reason === "user_denied" && outcome === "timeout" ? "consent_timeout" : g.reason);
 
-      // The dialog just blocked for up to a minute. Nothing below may assume the
+      // The dialog was open for up to APINJ_CONSENT_TIMEOUT_S seconds. Nothing below may assume the
       // tab is still the tab, hence the post-consent re-check and the per-keystroke
       // ones inside `run`.
       try { await guard(); } catch (e) { return fail((e as GateAbort).reason); }

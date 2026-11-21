@@ -105,7 +105,7 @@ test("an unreadable tab origin blocks rather than falling through", async () => 
 
 // ── C1: the consent dialog is a navigation window (time-of-check/time-of-use) ─
 //
-// `confirmInjection` is a blocking osascript dialog with `giving up after 60`.
+// `confirmInjection` is an osascript dialog that waits up to APINJ_CONSENT_TIMEOUT_S (default 25 s).
 // The shipped code read the origin ONCE before it and never again, so anything
 // that navigated the tab during those seconds — a page timer, a meta refresh, or
 // the SAME prompt-injected model calling `navigate_page` through its browser MCP —
