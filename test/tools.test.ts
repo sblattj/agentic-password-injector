@@ -854,9 +854,12 @@ test("login reports submitted from the page's own answer", async () => {
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
-test("all six tools are registered with schemas", () => {
+test("all ten tools are registered with schemas", () => {
   const names = MANIFEST.map((m) => m.name).sort();
-  expect(names).toEqual(["fill_credential", "fill_secret", "fill_totp", "list_credentials", "login", "save_credential"]);
+  expect(names).toEqual([
+    "fill_credential", "fill_email_code", "fill_secret", "fill_sms_code", "fill_totp", "list_credentials", "login",
+    "passkey_login", "passkey_register", "save_credential",
+  ]);
   for (const m of MANIFEST) {
     expect(typeof TOOLS[m.name]).toBe("function");
     expect(m.inputSchema.type).toBe("object");

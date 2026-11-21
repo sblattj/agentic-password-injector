@@ -1,9 +1,15 @@
-import { CdpError, getLoaderId, getOrigin, resolveTarget, withConn, type Send } from "./cdp.ts";
+import { type CdpError, getLoaderId, getOrigin, resolveTarget, withConn, type Send } from "./cdp.ts";
 import { confirmInjection, confirmSecretInjection, dialogRequired, promptForPassword } from "./consent.ts";
 import { PUBLIC_SUFFIXES } from "./domain.ts";
-import { decideGate } from "./gate.ts";
+import { isValidSecretName, normalizeSaveOrigin } from "./validate.ts";
+import { PASSKEY_TOOLS } from "./passkeys.ts";
+import { confirmKind } from "./consent.ts";
+import { extractCode } from "./codes/extract.ts";
+import { gmailSource } from "./codes/gmail.ts";
+import { messagesSource } from "./codes/messages.ts";
+import type { CodeSource } from "./codes/types.ts";
+import { GateAbort, fail, gatedOnOrigin, type FillResult, type Guard } from "./gated.ts";
 import { VISIBLE_FN, detectLoginFields, inspectField, typeIntoField, type TypeOptions } from "./inject.ts";
-import { originMatches } from "./origin.ts";
 import { SECRET_FORMATS, isSecretFormat, shape, type SecretFormat } from "./secret.ts";
 import { totpCode } from "./totp.ts";
 import { resolveCredential, type Resolved } from "./vault/index.ts";
@@ -68,10 +74,6 @@ export const REAL_DEPS: Deps = {
 // tool, because a decrypt/keychain error message can carry fragments of state we
 // have not audited. Distinct reasons keep "vault is locked" from ever reading
 // like "that password was wrong".
-export type FillResult = { filled: boolean; submitted?: boolean; reason?: string };
-
-const fail = (reason: string): FillResult => ({ filled: false, reason });
-
 /**
  * The origin a credential is BOUND to. Never derived from the caller-supplied
  * domain: doing so would make the gate compare the tab against a value the caller
@@ -141,26 +143,6 @@ function vaultFailReason(e: unknown): string {
 }
 
 /**
- * Thrown by `guard` to abort a fill from deep inside `run` without typing.
- * Carries a fixed reason code, never a message that could echo page state.
- */
-class GateAbort extends Error {
-  constructor(public reason: string) { super(reason); }
-}
-
-/**
- * A pre-keystroke check: resolves if the tab is still what was authorised, else
- * throws. Passed down into `typeIntoField` so the LAST thing before the keystroke
- * is another assertion, not a stale one from three round-trips ago (M3).
- */
-export type Guard = () => Promise<void>;
-
-// Reason codes raised as exceptions from inside `run` that must survive the outer
-// catch verbatim instead of collapsing to `tab_unavailable` — the user needs to
-// see WHY nothing was typed.
-const PASSTHROUGH_REASONS = new Set(["focus_lost", "navigated_during_consent"]);
-
-/**
  * Resolve → connect → **origin-check** → consent → gate → **re-check before every
  * keystroke**.
  *
@@ -187,6 +169,7 @@ async function gated(
   d: Deps,
   args: { tabId?: unknown; domain?: unknown; name?: unknown },
   run: (send: Send, cred: Cred, guard: Guard) => Promise<FillResult>,
+  consent?: (cred: Cred) => Promise<boolean>,
 ): Promise<FillResult> {
   const tabId = typeof args.tabId === "string" ? args.tabId : "";
   const domain = typeof args.domain === "string" ? args.domain : "";
@@ -213,84 +196,9 @@ async function gated(
   // The human authorises the BOUND origin — the same value the gate enforces.
   return gatedOnOrigin(
     d, tabId, savedOrigin,
-    () => d.confirmInjection(savedOrigin, cred.username, domain),
+    consent ? () => consent(cred) : () => d.confirmInjection(savedOrigin, cred.username, domain),
     (send, guard) => run(send, cred, guard),
   );
-}
-
-/**
- * Everything after "which secret" is settled: connect, origin-check, consent,
- * gate, and hand `run` a guard that re-asserts before every keystroke.
- *
- * Split out of `gated` so a NAMED SECRET gets these guarantees verbatim rather
- * than in a second, subtly-different copy. What differs between a credential and
- * a secret is entirely upstream of here — which vault answers, what the dialog
- * says, which field is legal — and none of that belongs in the TOCTOU path.
- */
-async function gatedOnOrigin(
-  d: Deps,
-  tabId: string,
-  savedOrigin: string,
-  consent: () => Promise<boolean>,
-  run: (send: Send, guard: Guard) => Promise<FillResult>,
-): Promise<FillResult> {
-  let target: { wsUrl: string };
-  try { target = await d.resolveTarget(tabId); } catch { return fail("tab_unavailable"); }
-
-  try {
-    return await d.withConn(target.wsUrl, async (send) => {
-      let tabOrigin: string;
-      let loaderId: string;
-      try {
-        tabOrigin = await d.getOrigin(send);
-        loaderId = await d.getLoaderId(send);
-      } catch { return fail("tab_unavailable"); }
-
-      // Pre-consent short-circuit: never prompt about a tab we would refuse anyway.
-      if (!originMatches(tabOrigin, savedOrigin)) return fail("origin_mismatch");
-      // Fail closed: with no loaderId there is no way to prove the document did
-      // not change under the dialog, so the fill is unverifiable, not "fine".
-      if (!loaderId) return fail("tab_unavailable");
-
-      /**
-       * Called immediately before EVERY keystroke. Both facts must still hold:
-       * the live origin still matches what the human authorised, AND the document
-       * is the same load it was when they authorised it.
-       */
-      const guard: Guard = async () => {
-        let liveOrigin: string;
-        let liveLoader: string;
-        try {
-          liveOrigin = await d.getOrigin(send);
-          liveLoader = await d.getLoaderId(send);
-        } catch { throw new GateAbort("tab_unavailable"); }
-        if (liveOrigin !== tabOrigin || !originMatches(liveOrigin, savedOrigin)) {
-          throw new GateAbort("navigated_during_consent");
-        }
-        if (!liveLoader || liveLoader !== loaderId) {
-          throw new GateAbort("navigated_during_consent");
-        }
-      };
-
-      const allow = await consent();
-      const g = decideGate({ tabOrigin, savedOrigin, allow });
-      if (!g.ok) return fail(g.reason);
-
-      // The dialog just blocked for up to a minute. Nothing below may assume the
-      // tab is still the tab, hence the post-consent re-check and the per-keystroke
-      // ones inside `run`.
-      try { await guard(); } catch (e) { return fail((e as GateAbort).reason); }
-
-      return await run(send, guard);
-    });
-  } catch (e) {
-    // Nothing past the gate should throw, but a socket death mid-flight must not
-    // surface a raw message — collapse to a fixed reason.
-    if (e instanceof GateAbort) return fail(e.reason);
-    const code = (e as CdpError)?.code;
-    if (code === "vault_locked" || code === "decrypt_failed" || PASSTHROUGH_REASONS.has(code)) return fail(code);
-    return fail("tab_unavailable");
-  }
 }
 
 // ── list_credentials ─────────────────────────────────────────────────────────
@@ -600,11 +508,6 @@ export async function fillTotp(args: unknown, d: Deps = REAL_DEPS): Promise<Fill
  * keeps it out of the sentence a human reads. Neither is allowed to be the only
  * guard.
  */
-const SECRET_NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/i;
-export function isValidSecretName(raw: string): boolean {
-  return SECRET_NAME_RE.test(raw);
-}
-
 /** `shape()` failures, mapped onto the fixed vocabulary without their message. */
 function shapeFailReason(e: unknown): string {
   const code = (e as CdpError)?.code;
@@ -696,6 +599,105 @@ export async function fillSecret(args: unknown, d: Deps = REAL_DEPS): Promise<Fi
   );
 }
 
+// ── fill_sms_code / fill_email_code ──────────────────────────────────────────
+//
+// A one-time code sent by SMS or email, read from the user's own Messages
+// database or mailbox and typed into the tab. Same gate as `fill_totp`: the tab
+// must match a SAVED credential's bound origin (a caller-named domain alone is no
+// binding), then consent, then a guard before the keystroke. The code, the
+// message, and the sender never leave this function.
+//
+// What the binding does NOT prove: that the code was meant for this site. A code
+// from site B that arrives while the agent waits on bound site A is typed into A.
+// Two narrowing rules: a WebOTP origin-bound line (`@host #code`) naming another
+// host is skipped, and a number with no code keyword near it is never taken.
+
+export interface CodeDeps {
+  sms: () => CodeSource;
+  email: () => CodeSource;
+  sleep: (ms: number) => Promise<void>;
+  now: () => number;
+  confirm: (kind: "sms_code" | "email_code", origin: string) => Promise<boolean>;
+}
+
+export const REAL_CODE_DEPS: CodeDeps = {
+  sms: () => messagesSource(),
+  email: () => gmailSource(),
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  now: () => Date.now(),
+  confirm: async (kind, origin) => !dialogRequired() || confirmKind(kind, origin),
+};
+
+export const CODE_WAIT_DEFAULT_MS = 20_000;
+export const CODE_WAIT_MAX_MS = 25_000;
+/** How far back `since` may reach. A code older than this is not "the one just requested". */
+export const CODE_LOOKBACK_MAX_MS = 10 * 60_000;
+/** Default lookback when the caller gives no `since`: covers "clicked Send code, then called the tool". */
+export const CODE_LOOKBACK_DEFAULT_MS = 60_000;
+const CODE_POLL_MS = 2_000;
+
+const SOURCE_REASONS = new Set(["messages_access_denied", "email_source_unavailable", "email_source_error", "source_error"]);
+
+/** `since` as ms epoch: a number (ms) or an ISO string, clamped to the lookback window. */
+export function resolveSince(raw: unknown, now: number): number {
+  let t = NaN;
+  if (typeof raw === "number") t = raw;
+  else if (typeof raw === "string" && raw) t = Date.parse(raw);
+  if (!Number.isFinite(t)) t = now - CODE_LOOKBACK_DEFAULT_MS;
+  return Math.min(now, Math.max(now - CODE_LOOKBACK_MAX_MS, t));
+}
+
+async function fillCode(kind: "sms" | "email", args: unknown, d: Deps, c: CodeDeps): Promise<FillResult> {
+  const a = (args ?? {}) as { selector?: unknown; since?: unknown; timeoutMs?: unknown; events?: unknown };
+  const selector = typeof a.selector === "string" && a.selector ? a.selector : null;
+  const events = Boolean(a.events);
+  const since = resolveSince(a.since, c.now());
+  const rawWait = typeof a.timeoutMs === "number" && Number.isFinite(a.timeoutMs) ? a.timeoutMs : CODE_WAIT_DEFAULT_MS;
+  const wait = Math.min(CODE_WAIT_MAX_MS, Math.max(0, Math.floor(rawWait)));
+  const promptKind = kind === "sms" ? "sms_code" : "email_code";
+
+  return gated(d, (args ?? {}) as any, async (send, cred, guard) => {
+    let host: string;
+    try { host = new URL(cred.origin).hostname.toLowerCase(); } catch { return fail("no_origin_binding"); }
+
+    let src: CodeSource;
+    try { src = kind === "sms" ? c.sms() : c.email(); }
+    catch (e) { const code = (e as CdpError)?.code; return fail(SOURCE_REASONS.has(code) ? code : "source_error"); }
+
+    let code: string | null = null;
+    const deadline = c.now() + wait;
+    for (;;) {
+      let msgs;
+      try { msgs = await src.fetchSince(since); }
+      catch (e) { const r = (e as CdpError)?.code; return fail(SOURCE_REASONS.has(r) ? r : "source_error"); }
+      // Newest first: the first message carrying a code for this host wins.
+      for (const m of msgs) {
+        if (m.at < since) continue;
+        code = extractCode(m.body, host);
+        if (code) break;
+      }
+      msgs = null;
+      if (code) break;
+      if (c.now() >= deadline) return fail("no_code");
+      await c.sleep(Math.max(0, Math.min(CODE_POLL_MS, deadline - c.now())));
+    }
+
+    try {
+      // The field is chosen AFTER the code arrived: many pages render the
+      // one-time-code box only once the code has been sent.
+      let sel = selector;
+      if (!sel) sel = chooseOtpField(await d.probeFields(send, OTP_ATTR, nextToken("otp")));
+      if (!sel) return fail("no_otp_field");
+      await guard();
+      await d.typeIntoField(send, sel, code, guard, { events });
+    } finally { code = ""; }
+    return { filled: true };
+  }, (cred) => c.confirm(promptKind, cred.origin));
+}
+
+export const fillSmsCode = (args: unknown, d: Deps = REAL_DEPS, c: CodeDeps = REAL_CODE_DEPS) => fillCode("sms", args, d, c);
+export const fillEmailCode = (args: unknown, d: Deps = REAL_DEPS, c: CodeDeps = REAL_CODE_DEPS) => fillCode("email", args, d, c);
+
 // ── Registration ─────────────────────────────────────────────────────────────
 const TAB = {
   tabId: { type: "string", description: "CDP target id of the tab to inject into" },
@@ -733,26 +735,6 @@ export const REAL_SAVE_DEPS: SaveDeps = {
 export type SaveResult =
   | { saved: true; name: string; origin: string; username: string; backend: "keychain" }
   | { saved: false; reason: string };
-
-const LOCAL_HTTP_HOSTS = new Set(["localhost", "127.0.0.1"]);
-
-/**
- * The origin the new entry is BOUND to, normalised to `scheme://host[:port]`.
- * https only, except plain http to the loopback names. Anything else is null.
- * The result is ASCII with no spaces or quotes (WHATWG URL serialisation), so it
- * survives `parseComment` unchanged.
- */
-export function normalizeSaveOrigin(raw: unknown): string | null {
-  if (typeof raw !== "string" || !raw || raw.length > 2048) return null;
-  let u: URL;
-  try { u = new URL(raw); } catch { return null; }
-  if (u.protocol === "https:") { /* ok */ }
-  else if (u.protocol === "http:" && LOCAL_HTTP_HOSTS.has(u.hostname)) { /* ok */ }
-  else return null;
-  if (!u.hostname) return null;
-  const o = u.origin;
-  return /^[\x21-\x7e]+$/.test(o) && !/["\\]/.test(o) ? o : null;
-}
 
 export async function saveCredential(args: unknown, d: SaveDeps = REAL_SAVE_DEPS): Promise<SaveResult> {
   const a = (args ?? {}) as { name?: unknown; origin?: unknown; username?: unknown; replace?: unknown };
@@ -792,6 +774,8 @@ export async function saveCredential(args: unknown, d: SaveDeps = REAL_SAVE_DEPS
   // 5. Metadata only.
   return { saved: true, name, origin, username, backend: "keychain" };
 }
+
+export { isValidSecretName, normalizeSaveOrigin };
 
 function register(name: string, description: string, inputSchema: Record<string, unknown>, fn: (args: unknown) => Promise<unknown>) {
   MANIFEST.push({ name, description, inputSchema });
@@ -904,3 +888,37 @@ register(
   },
   (args) => saveCredential(args),
 );
+
+const CODE_PROPS = {
+  ...TAB,
+  selector: { type: "string", description: "Optional CSS selector for the one-time-code input" },
+  since: {
+    type: "number",
+    description: "When the code was requested, in ms since epoch (Date.now()), e.g. just before clicking 'Send code'. " +
+      "Only messages at or after it count. Default: 60 s before the call; clamped to the last 10 minutes.",
+  },
+  timeoutMs: { type: "number", description: `Max wait for the code in ms (default ${CODE_WAIT_DEFAULT_MS}, max ${CODE_WAIT_MAX_MS})` },
+  events: EVENTS_PROP,
+} as const;
+
+register(
+  "fill_sms_code",
+  "Wait (bounded) for the newest one-time code that arrived by text message (macOS Messages) since <since>, and " +
+  "type it into the one-time-code field, after an origin match against a saved credential for <domain> and " +
+  "consent. Needs Full Disk Access for the process running this server. Returns only {filled, reason?}; never " +
+  "the code, the message, or the sender.",
+  { type: "object", properties: CODE_PROPS, required: ["tabId", "domain"], additionalProperties: false },
+  (args) => fillSmsCode(args),
+);
+
+register(
+  "fill_email_code",
+  "Wait (bounded) for the newest one-time code that arrived by email since <since>, and type it into the " +
+  "one-time-code field, after an origin match against a saved credential for <domain> and consent. The email " +
+  "source is Gmail via an OAuth token file named by APINJ_GMAIL_TOKEN_FILE. Returns only {filled, reason?}; " +
+  "never the code, the message, or the sender.",
+  { type: "object", properties: CODE_PROPS, required: ["tabId", "domain"], additionalProperties: false },
+  (args) => fillEmailCode(args),
+);
+
+for (const t of PASSKEY_TOOLS) register(t.name, t.description, t.inputSchema as unknown as Record<string, unknown>, t.fn);

@@ -2,7 +2,7 @@
 
 **A self-hosted version of 1Password's Secure Agentic Autofill / Infisical's Agent Vault — built on the password store your browser already has, the macOS Keychain, and a CDP connection. No subscription, no credential migration, and the model never sees the secret.**
 
-It is an [MCP](https://modelcontextprotocol.io) server with four tools. When your agent hits a login wall, it calls `login({tabId, domain})`; the credential is read from a local vault and typed straight into the page's DOM inside *this* process. The only thing that crosses back into the model's context is `{filled: true}`.
+It is an [MCP](https://modelcontextprotocol.io) server with ten tools. When your agent hits a login wall, it calls `login({tabId, domain})`; the credential is read from a local vault and typed straight into the page's DOM inside *this* process. The only thing that crosses back into the model's context is `{filled: true}`.
 
 ---
 
@@ -20,9 +20,9 @@ This is the part that matters, so every claim below points at the code that impl
 
 ### 1. No tool ever returns a secret
 
-The secret is fetched from the vault and dispatched at the page as real keystrokes (`Input.insertText`) entirely inside the MCP process. Every tool's return type is `FillResult = { filled: boolean; submitted?: boolean; reason?: string }` (`src/tools.ts`) — there is no field a password could travel in, and no reveal tool exists. Failure `reason`s come from a **fixed vocabulary** (`origin_mismatch`, `user_denied`, `vault_locked`, …); raw error text never escapes a tool, because a decrypt/Keychain error message can carry unaudited state (`secretFailReason` / `vaultFailReason` in `src/tools.ts`).
+The secret is fetched from the vault and dispatched at the page as real keystrokes (`Input.insertText`) entirely inside the MCP process. Every fill tool's return type is `FillResult = { filled: boolean; submitted?: boolean; reason?: string }` (`src/gated.ts`), and the passkey tools return `{ saved, name, origin, rpId }` / `{ used, reason? }` (`src/passkeys.ts`): there is no field a password, code or private key could travel in, and no reveal tool exists. Failure `reason`s come from a **fixed vocabulary** (`origin_mismatch`, `user_denied`, `vault_locked`, …); raw error text never escapes a tool, because a decrypt/Keychain error message can carry unaudited state (`secretFailReason` / `vaultFailReason` in `src/tools.ts`).
 
-`test/leak.test.ts` is the load-bearing test: it drives `login`, `fill_totp` and `fill_secret` through *every* return branch with a sentinel secret and asserts the sentinel — and, for `fill_secret`, its length and any mask of it — appears in no return value and no thrown message — and then asserts the sentinel *did* reach `typeIntoField`, so the absence-assertions are provably non-vacuous rather than testing nothing.
+`test/leak.test.ts` is the load-bearing test for the password tools, with the same sentinel pattern for passkeys in `test/passkeys.test.ts` (the private key) and for one-time codes in `test/codes-tools.test.ts` (the code, the message text and the sender): it drives `login`, `fill_totp` and `fill_secret` through *every* return branch with a sentinel secret and asserts the sentinel — and, for `fill_secret`, its length and any mask of it — appears in no return value and no thrown message — and then asserts the sentinel *did* reach `typeIntoField`, so the absence-assertions are provably non-vacuous rather than testing nothing.
 
 The plaintext's lifetime is also bounded on purpose: it is zeroed in a `finally` the moment the keystrokes are out (`login` / `fillCredential` in `src/tools.ts`), and the CDP dispatcher clears each command's timeout on settle, so a stale timer closure cannot keep the `Input.insertText` params — i.e. the password — reachable for the timeout window (`createDispatcher`, `src/cdp.ts`).
 
@@ -87,13 +87,24 @@ Without `sel=allow`, auto-detection is one candidate or refuse (`chooseSecretFie
 
 Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so the caller never handles the value, and each **asserts exactly nine digits and refuses rather than sending** (`shape`, `src/secret.ts`) — without that, `last4` on a four-digit stored value returns the whole value. Nothing is read back: the return stays `{filled, reason?}`, with no length and no mask. The reference implementation's masking was wrong twice in one day for the same reason — secrecy is a property of the **format**, not the length, and a naive `len >= 8` test printed the last two digits of an 11-character dashed SSN.
 
+### 10. Agent passkeys stay inside the server, and your own passkeys are never touched
+
+`passkey_register` and `passkey_login` run a WebAuthn ceremony through the CDP `WebAuthn` domain with a **virtual authenticator attached to that one tab** (`withAuthenticator`, `src/passkeys.ts`). It is added, used and removed inside a single CDP connection, so the browser's real authenticators and the passkeys you created yourself are never offered, read or changed. Registration reads the new credential back with `WebAuthn.getCredentials` and stores the private key, credential id, rpId, user handle and sign count in the Keychain as `apinj-passkey:<name>`, bound to the origin, written over `security -i` stdin (`passkeyStore`, `src/vault/passkey.ts`). Sign-in passes the same origin gate and consent as the password tools, and only then decrypts the record (`getRecord` is lazy) and calls `WebAuthn.addCredential`. The rpId must be the origin's host or a parent of it (`rpIdFits`). Neither tool returns the key, the credential id or the user handle: register returns `{saved, name, origin, rpId}` and sign-in returns `{used, reason?}`.
+
+### 11. One-time codes from Messages and Gmail are read, typed and dropped
+
+`fill_sms_code` and `fill_email_code` wait (at most 25 s) for the newest code that arrived after `since`, then type it into the one-time-code field. They use the same gate as `fill_totp`: the tab must match a **saved credential's** origin for `domain`, then consent, then a guard before the keystroke (`fillCode`, `src/tools.ts`). Messages are read only after consent. Messages comes from `~/Library/Messages/chat.db`, opened read-only (`messagesSource`, `src/codes/messages.ts`); email comes from Gmail's read-only API using an OAuth token file you point at with `APINJ_GMAIL_TOKEN_FILE` (`gmailSource`, `src/codes/gmail.ts`). The return is `{filled, reason?}` only: never the code, the message text or the sender. A number is only taken when a code keyword is near it, and a WebOTP line (`@host #code`) naming another host is skipped (`extractCode`, `src/codes/extract.ts`).
+
 ---
 
 ## Non-goals and honest limitations
 
-- **Not a password manager.** It reads existing vaults. No create, edit, generate, or delete.
+- **Not a password manager.** It reads existing vaults and can add a Keychain login or an agent passkey. No edit, generate, or delete.
 - **It does not make banking hands-free.** Every fill is gated behind a human clicking Allow, per use. This makes agent-assisted login *possible with you approving each step*, not autonomous. If that's what you wanted, this is the wrong tool.
-- **No SMS or email OTP.** Those can't be vaulted. Authenticator-app TOTP works only if you store the seed yourself.
+- **SMS and email codes are bound to the site, not to the message.** `fill_sms_code` checks the tab against your saved credential, but it cannot prove the code was meant for that site: a code from another service that arrives during the wait is typed in. Pass `since` right before you click "Send code" to keep the window short. Authenticator-app TOTP works only if you store the seed yourself.
+- **`fill_sms_code` needs Full Disk Access** for the app running the server (System Settings > Privacy & Security > Full Disk Access, enable your terminal or the Claude app). Without it the tool returns `messages_access_denied`; it never asks for sudo.
+- **`fill_email_code` is Gmail only for now** and needs `APINJ_GMAIL_TOKEN_FILE` pointing at an `authorized_user` OAuth token file with the `gmail.readonly` scope (the shape Google's workspace MCP servers write). The token is refreshed in memory only. Without it the tool returns `email_source_unavailable`. The source is pluggable (`CodeSource`, `src/codes/types.ts`).
+- **Passkey ceremonies need a visible tab.** Chromium refuses WebAuthn in a tab that is not visible (a background tab, a minimised window) with "page does not have focus", so the tools return `tab_not_visible` instead of trying. Agent passkeys are separate credentials the agent owns; they are not your synced passkeys and they do not sync anywhere.
 - **macOS only.** The vault backends shell out to `security`, the browser stores live under `~/Library`, and the consent dialog is `osascript`.
 - **Chromium-family browser with a CDP debug port required.** Vivaldi, Arc, Chrome, Edge, Brave. No Firefox, no Safari.
 - **Vivaldi and Arc are the only browser *vault* backends** (looked up in that order, then the Keychain). Chrome's own store is not read yet (the backend interface is pluggable; a `1password-op` backend doesn't exist either).
@@ -102,7 +113,7 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 
 ---
 
-## The six tools
+## The ten tools
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
@@ -112,6 +123,10 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 | `fill_totp` | `tabId`, `domain` (required), `name?`, `selector?` | `{ filled, reason? }` |
 | `fill_secret` | `tabId`, `name` (required), `selector?`, `format?`, `events?` | `{ filled, reason? }` |
 | `save_credential` | `name`, `origin`, `username` (required), `replace?` | `{ saved, name, origin, username, backend }` or `{ saved: false, reason }` |
+| `passkey_register` | `tabId`, `name`, `origin` (required), `selector?`, `timeoutMs?`, `replace?` | `{ saved, name, origin, rpId }` or `{ saved: false, reason }` |
+| `passkey_login` | `tabId`, `name` (required), `selector?`, `timeoutMs?` | `{ used, reason? }` |
+| `fill_sms_code` | `tabId`, `domain` (required), `name?`, `selector?`, `since?`, `timeoutMs?`, `events?` | `{ filled, reason? }` |
+| `fill_email_code` | `tabId`, `domain` (required), `name?`, `selector?`, `since?`, `timeoutMs?`, `events?` | `{ filled, reason? }` |
 
 - `tabId` is a **CDP target id** — always explicit, never "the active tab".
 - `domain` is the domain of the *saved credential* (`github.com`), and must be a registrable domain.
@@ -120,11 +135,17 @@ Formats (`dashed`, `last4`, `first3`, `mid2`) are shaped inside the server so th
 - `fill_totp` reads the seed, computes the code, types it, and drops both. Neither is ever returned.
 - `fill_secret` types a **named non-credential secret** — an SSN, a freeze PIN, a date of birth, an account number. It takes no `domain`: the Keychain entry `apinj:<name>` *is* the lookup key, and its stored origin is the binding. See [named secrets](#9-named-secrets-are-a-narrower-capability-not-a-selector-api) below and `docs/keychain-setup.md`.
 - `save_credential` adds a Keychain login without the model ever seeing the password. The caller names the entry, the site and the username; a native macOS dialog with a **hidden** answer field asks the human to type or paste the password, and the value goes straight from that dialog to `security -i` over stdin (never argv, never a return value). The dialog **always** appears, whatever `APINJ_CONFIRM` says, because only a human can supply the secret. The entry is `apinj:<name>` bound to the normalised origin, so `login({ domain, name })` finds it afterwards. See `docs/keychain-setup.md`.
+- `passkey_register` arms a virtual authenticator on the tab, clicks `selector` (the site's "Create a passkey" button) as a user gesture, waits up to `timeoutMs` (default 20 s, max 25 s) for the site to create the credential, then saves it as `apinj-passkey:<name>` bound to `origin`. Without `selector`, the agent clicks the button itself while the call waits. `passkey_login` does the same for sign-in with the saved credential and writes back the new sign count. The tab must be visible.
+- `fill_sms_code` / `fill_email_code` take `domain` and `name?` like `fill_totp`: the saved credential is the origin binding. `since` is when the code was requested, in ms since epoch (default 60 s before the call, never more than 10 minutes back). The field is picked after the code arrives, the same way as `fill_totp`, or by `selector`.
 - `events` fires a synthetic `keydown`/`keypress`/`keyup`/`change` burst after the insert. `Input.insertText` fires native `beforeinput`/`input` but **no keyboard events**, so a validator wired to `keyup` shows "criteria not met" against a value that is actually correct. Opt-in, because synthesising key events makes the page believe a human typed.
 
 Common `reason` codes: `origin_mismatch`, `user_denied`, `navigated_during_consent`, `no_origin_binding`, `not_found`, `vault_locked`, `vault_error`, `focus_lost`, `ambiguous_password_field`, `no_password_field`, `no_username_field`, `no_otp_field`, `no_totp`, `bad_domain`, `tab_unavailable`.
 
 `fill_secret` adds: `name_required`, `bad_name`, `bad_format`, `format_mismatch`, `selector_not_allowed`, `kind_not_allowed`, `field_not_visible`, `no_secret_field`, `ambiguous_secret_field`.
+
+`passkey_register` / `passkey_login` add: `invalid_name`, `invalid_origin`, `bad_name`, `name_required`, `exists`, `tab_not_visible`, `no_trigger`, `timeout` (a credential for a foreign rpId is never saved or used); `passkey_login` can return `{ used: true, reason: "sign_count_not_saved" }` when sign-in worked but the new count could not be written back.
+
+`fill_sms_code` / `fill_email_code` add: `no_code` (nothing arrived in time), `messages_access_denied`, `email_source_unavailable`, `email_source_error`, `source_error`.
 
 `save_credential` returns: `invalid_name`, `invalid_origin`, `invalid_username` (refused before any dialog), `exists` (pass `replace: true` to overwrite), `user_cancelled` (Cancel, timeout, or an empty answer), `password_unsupported`, `vault_locked`, `vault_error`.
 
@@ -232,6 +253,8 @@ The whole design keeps the secret out of your context — and then a single `tak
 
 This is not hypothetical, and it is worse for `fill_secret` than for a password: on 2026-08-25 an accessibility snapshot of a filled identity form printed **every input value, SSN included**, into an agent transcript. The secret was protected on the way in and leaked on the way out. A `type="text"` SSN box — which is exactly what `kind=text` exists to allow — has none of the masking a password input gets.
 
+The same goes for `fill_sms_code` and `fill_email_code`: a one-time code sits in a plain text input, so a snapshot after the fill prints it.
+
 Related: `login({submit: true})` exists precisely so the fill-and-submit sequence needs no intermediate look.
 
 > **2. A red validation indicator is not evidence the value is wrong.**
@@ -240,7 +263,7 @@ A page can validate cosmetically and submit correctly, or the reverse. Before ac
 
 > **3. A refusal is the tool working.**
 
-`ambiguous_secret_field`, `kind_not_allowed`, `selector_not_allowed` and `focus_lost` all mean *nothing was typed*. None of them is fixed by retrying with different arguments — `selector_not_allowed` and `kind_not_allowed` are fixed only by the human changing the stored entry, and `ambiguous_secret_field` means the page has more than one candidate field and the server will not guess between them. Report the refusal; do not work around it.
+`ambiguous_secret_field`, `kind_not_allowed`, `selector_not_allowed` and `focus_lost` all mean *nothing was typed*. So do `no_code`, `messages_access_denied`, `email_source_unavailable` and `tab_not_visible`: never route around them by reading the text message or the email yourself with another tool (a mail or Messages MCP, a screenshot of the inbox). That puts the code straight into your context, which is the one thing these tools exist to prevent. None of them is fixed by retrying with different arguments — `selector_not_allowed` and `kind_not_allowed` are fixed only by the human changing the stored entry, and `ambiguous_secret_field` means the page has more than one candidate field and the server will not guess between them. Report the refusal; do not work around it.
 
 ## Coordinating with cdp-toolkit
 

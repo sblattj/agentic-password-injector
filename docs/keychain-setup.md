@@ -207,3 +207,21 @@ done
 That is deliberate. A single entry bound to nothing, or bound to a wildcard,
 would mean the gate compares the tab against a value that matches everything —
 which is no binding at all.
+
+## Agent passkeys (`apinj-passkey:<name>`)
+
+`passkey_register` writes these for you; you never create them by hand. Each is
+one generic-password item: service `apinj-passkey:<name>`, account = the
+WebAuthn rpId, comment = the bound origin, password = a JSON record holding the
+PKCS#8 private key, credential id, user handle and sign count. To see which
+exist without decrypting anything:
+
+```sh
+security dump-keychain | grep '"apinj-passkey:'
+```
+
+To remove one (the site keeps its public key; delete the passkey there too):
+
+```sh
+security delete-generic-password -s 'apinj-passkey:<name>'
+```

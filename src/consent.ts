@@ -85,6 +85,40 @@ export function buildSecretDialogScript(boundOrigin: string, secretName?: string
 }
 
 /**
+ * Passkey and one-time-code prompts. Same rules as the secret dialog: the bound
+ * host is the server's own value, and the entry name survives only if it passes
+ * `safeSecretName`. `what` is a fixed vocabulary chosen by the server, never
+ * caller text.
+ */
+export type PromptKind = "passkey_register" | "passkey_login" | "sms_code" | "email_code";
+
+export function buildKindDialogScript(kind: PromptKind, boundOrigin: string, entryName?: string): string {
+  const esc = (s: string) => s.replace(/[\\"]/g, "\\$&");
+  const host = esc(boundHost(boundOrigin));
+  const name = safeSecretName(entryName);
+  const entry = name ? ` (entry '${esc(name)}')` : "";
+  const text =
+    kind === "passkey_register" ? `Create an agent passkey for ${host}${entry}?` :
+    kind === "passkey_login" ? `Sign in to ${host} with the agent passkey${entry}?` :
+    kind === "sms_code" ? `Type the newest text-message code into ${host}?` :
+    `Type the newest email code into ${host}?`;
+  return `display dialog "${text}" buttons {"Deny","Allow"} default button "Deny" with title "agentic-password-injector" giving up after 60`;
+}
+
+export async function confirmKind(
+  kind: PromptKind,
+  boundOrigin: string,
+  entryName?: string,
+  run: DialogRunner = realRunner,
+): Promise<boolean> {
+  try {
+    return /button returned:Allow/.test(run(buildKindDialogScript(kind, boundOrigin, entryName)));
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether a fill raises the Allow/Deny dialog at all. Off by default: every fill
  * is auto-approved, and the protections that do not need a human (mandatory
  * origin binding, the pre-keystroke `loaderId` guard) still run. Set
