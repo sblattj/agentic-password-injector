@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-20
+
+### Fixed
+
+- The consent dialog no longer outlives MCP gateway timeouts, and no longer
+  blocks the server while it is open. Fixes #1.
+  - Allow/Deny dialogs give up after 25 s by default (was 60 s), below the
+    ~30 s many gateways allow a tool call. `APINJ_CONSENT_TIMEOUT_S` (1 to 600)
+    changes it. An unanswered dialog now returns `consent_timeout` instead of
+    `user_denied`.
+  - `osascript` runs async, so `tools/list` and health checks are answered
+    while a dialog is up. Before, `execFileSync` froze the event loop and a
+    gateway could mark the backend unhealthy.
+  - A cancelled or disconnected call kills its dialog, and an Allow that
+    arrives after the caller has gone types nothing (`request_cancelled`).
+    Before, a late Allow still typed into the page with nobody listening for
+    the result; the new end-to-end test reproduced that silent fill.
+  - The post-consent wait in `fill_sms_code`, `fill_email_code` and the
+    passkey tools shares one time budget with the dialog, so a slow Allow plus
+    a full wait cannot outlive the gateway either.
+
 ## [0.6.0] - 2026-11-20
 
 ### Added
