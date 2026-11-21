@@ -214,3 +214,15 @@ test("e2e: fixture chat.db, newest code after since wins, older and outgoing row
   const denied = await fillSmsCode({ ...ARGS, timeoutMs: 0 }, m.d, { ...c, sms: () => messagesSource({ dbPath: join(dir, "missing", "chat.db") }) });
   expect(denied).toEqual({ filled: false, reason: "messages_access_denied" });
 });
+
+test("issue #1: a slow Allow shortens the code wait so the call stays inside the budget", async () => {
+  const m = mk({ msgs: [] });
+  const base = m.c.now;
+  let skew = 0;
+  m.c.now = () => base() + skew;
+  // The human takes 20 s to click Allow; the budget is max(timeoutMs, 25 s consent timeout).
+  m.c.confirm = async () => { skew += 20_000; return true; };
+  const r = await fillSmsCode({ ...ARGS, timeoutMs: 20_000 }, m.d, m.c);
+  expect(r).toEqual({ filled: false, reason: "no_code" });
+  expect(m.slept).toBe(5_000); // 25 s budget - 20 s in the dialog, not a fresh 20 s
+});

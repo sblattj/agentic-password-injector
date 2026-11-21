@@ -268,3 +268,16 @@ test("passkey tools are registered with strict schemas", () => {
     expect(JSON.stringify(s)).not.toContain("privateKey");
   }
 });
+
+test("issue #1: a slow Allow shortens the ceremony wait so the call stays inside the budget", async () => {
+  let waited = 0;
+  let t = 0;
+  const m = mk({ onClick: "nothing" }, {
+    sleep: async (ms) => { waited += ms; t += ms; },
+    now: () => t,
+    confirm: async () => { t += 20_000; return true; }, // 20 s to click Allow
+  });
+  const r = await passkeyLogin({ tabId: "T", name: "ex", selector: "#login", timeoutMs: 20_000 }, m.d);
+  expect(r).toEqual({ used: false, reason: "timeout" });
+  expect(waited).toBe(5_000); // 25 s budget - 20 s in the dialog
+});
