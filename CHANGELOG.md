@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `apinj-accounts`, an account manager for CLI tools that have one login per
+  HOME (Kiro CLI first), modeled on macsub's verbs: `add`, `ls`, `usage`,
+  `swap` / `best`, `home`, `data-dir`, `run`, `whoami`, `login`, `shim`, `rm`.
+  - Each account runs under its own HOME, so a second login works without
+    logging the first one out. A `--pinned` account (the login you already use)
+    is never logged in, logged out or written to, and no other account may
+    share its HOME.
+  - `login` runs the device-code flow and approves it in the account's own
+    headless browser profile (its own cookies, a DevTools port the browser
+    picks), typing the username, password and optional TOTP through the
+    injector's gated fills. The password is typed at most once per run, it only
+    clicks allowlisted buttons on the two expected origins, and a login that
+    lands as the wrong identity is logged back out.
+  - `usage` reads credits used and left per account from `/usage`; `best`
+    picks the account with the most left.
+  - `APINJ_ACCOUNT=<name>` selects the account per process, so a harness can
+    pick one per run (`home`, `data-dir`, `run`, and the `shim` wrapper).
+  - The registry (`~/.config/apinj-accounts/accounts.json`, 0600) holds no
+    secrets; passwords stay in the Keychain as `apinj:<entry>`.
+
 ## [0.7.0] - 2026-11-20
 
 ### Fixed

@@ -305,6 +305,58 @@ This works well alongside a general browser-driving MCP such as [cdp-toolkit](ht
 
 ---
 
+## Several CLI logins side by side: `apinj-accounts`
+
+Some CLIs keep exactly one login per HOME (the Kiro CLI keeps its token in
+`~/Library/Application Support/kiro-cli/data.sqlite3`). `apinj-accounts` gives
+each account its own HOME, so two logins live side by side, and logs an
+account in by approving the CLI's device code in that account's own browser
+profile, with the injector typing the credentials. It follows the shape of
+[macsub](https://github.com/sblattj/multi-auto-claude-sub).
+
+```sh
+alias apinj-accounts='bun /path/to/agentic-password-injector/src/accounts/cli.ts'
+
+apinj-accounts add me --home ~ --pinned \
+  --start-url https://<your-idc>.awsapps.com/start --region <idc-region> \
+  --signin-origin https://login.<your-idp>.com     # the login you already use; never touched
+apinj-accounts add svc --from me                   # a second account, own HOME under ~/.local/share/apinj-accounts
+# save each account's IdP password once: a native dialog, straight into the Keychain
+#   (save_credential, name kiro-<account>, origin = the --signin-origin)
+apinj-accounts login svc                           # device flow, approved in svc's own browser
+apinj-accounts ls                                  # login state and identity per account
+apinj-accounts usage                               # credits used / left per account, and the best pick
+apinj-accounts swap svc                            # active account for `run`, `home` and the shim
+apinj-accounts run svc -- kiro-cli chat            # one command under svc's HOME
+apinj-accounts shim ~/.local/bin/apinj            # a kiro-cli wrapper that resolves the account at exec time
+APINJ_ACCOUNT=svc ~/.local/bin/apinj/kiro-cli whoami   # pick the account per process
+```
+
+How it stays safe:
+
+- **No secret in the registry.** `~/.config/apinj-accounts/accounts.json`
+  (0600) holds names, HOME paths, the IdP settings and the *name* of each
+  Keychain entry. The manager reads only the entry's attributes (the username,
+  to check the identity after login).
+- **Every keystroke goes through the gate.** `login` calls the same
+  `fillCredential` / `fillTotp` the MCP tools use (`makeFillers`,
+  `src/accounts/login.ts`): origin bound by the Keychain entry, `loaderId`
+  guard before each keystroke, plaintext zeroed in a `finally`.
+  `test/accounts-leak.test.ts` drives the whole login with a sentinel password
+  and seed and asserts they reach the page and nothing else.
+- **A separate browser profile per account.** Your daily browser is likely
+  signed in to the same IdP as someone else; approving a device code there
+  would log the new HOME in as that identity. The account browser starts
+  headless with its own `--user-data-dir` and `--remote-debugging-port=0`, so
+  it never lands on a port another app owns. After login, `whoami` must match
+  the Keychain entry's username, or the HOME is logged back out.
+- **No lockouts, no wandering.** The password is typed at most once per run;
+  the driver clicks only allowlisted buttons (`next`, `sign in`, `yes`,
+  `confirm and continue`, `allow access`, ...) and only on the IdP origin and
+  the device-approval origin (`drive`, `src/accounts/drive.ts`).
+- **Pinned means untouched.** A pinned account is never logged in or out by
+  this tool, and no other account may use its HOME or your real HOME.
+
 ## Development
 
 ```sh
