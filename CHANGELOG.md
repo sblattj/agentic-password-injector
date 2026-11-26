@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   spinning, logs a value-free description of a page it stops on, waits out an
   authenticator-app push (logging the number to match), and with a stored TOTP
   seed picks "use a verification code" instead.
+- `apinj-accounts login` walks a passkey ("face, fingerprint, PIN or security
+  key") page to a verification code through "sign in another way" when a TOTP
+  seed is stored (it stops as `passkey_required` without one), and only clicks
+  allowlisted links on `login.signinAltOrigins`, never types there. When the
+  IdP redirect lands on the access portal home, it reopens the device approval
+  page.
 
 ### Added
 

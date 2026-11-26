@@ -343,6 +343,12 @@ How it stays safe:
   (0600) holds names, HOME paths, the IdP settings and the *name* of each
   Keychain entry. The manager reads only the entry's attributes (the username,
   to check the identity after login).
+- **MFA by code, never by guess.** With a TOTP seed stored as
+  `apinj-totp:<entry>`, `login` swaps an authenticator push or a passkey page
+  for "use a verification code" and types the code through the injector's
+  gated fill. Without a seed it waits out a push (logging the number to match)
+  and stops on a passkey page. Extra IdP origins (`login.signinAltOrigins`, for
+  example the IdP's passkey host) only get allowlisted link clicks, never typing.
 - **Every keystroke goes through the gate.** `login` calls the same
   `fillCredential` / `fillTotp` the MCP tools use (`makeFillers`,
   `src/accounts/login.ts`): origin bound by the Keychain entry, `loaderId`

@@ -19,6 +19,8 @@ export interface KiroLogin {
   credential?: string;
   /** The IdP's sign-in origin the credential is bound to, e.g. https://login.example.com. */
   signinOrigin?: string;
+  /** Other origins of the same IdP (e.g. a passkey page) where only allowlisted links are clicked. */
+  signinAltOrigins?: string[];
 }
 
 export interface Account {

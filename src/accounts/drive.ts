@@ -18,8 +18,9 @@ const ALL_FN =
 // whose visible text is on a short allowlist. Anything else is waited out and,
 // if it persists, reported by origin.
 
+/** `passkey`: the IdP offers a passkey / security key (never used here). */
 /** `push`: the IdP waits for an authenticator-app approval; `number` is the one to match, if shown. */
-export type PageKind = "username" | "password" | "otp" | "push" | "approved" | "button" | "unknown";
+export type PageKind = "username" | "password" | "otp" | "push" | "passkey" | "approved" | "button" | "unknown";
 
 export interface PageState { origin: string; kind: PageKind; button?: string; number?: string }
 
@@ -28,6 +29,8 @@ export interface DriverDeps {
   fill: (field: "username" | "password") => Promise<FillResult>;
   totp: () => Promise<FillResult>;
   click: (text: string) => Promise<boolean>;
+  /** Load the device-approval URL again (the IdP redirect can land on the portal home instead). */
+  reopenDevice?: () => Promise<void>;
   /** Called once per push-approval prompt (and again if the number changes). */
   onPush?: (number?: string) => void;
   sleep: (ms: number) => Promise<void>;
@@ -39,6 +42,8 @@ export interface DriverDeps {
 
 export interface DriveOptions {
   signinOrigin: string;
+  /** More origins of the same IdP where only allowlisted links are clicked, never typed into. */
+  signinAltOrigins?: string[];
   /** Where the device code is approved: the start-URL origin and the IdC region's sign-in origin. */
   approveOrigins: string[];
   timeoutMs: number;
@@ -51,8 +56,12 @@ export type DriveResult = { ok: true } | { ok: false; reason: string; origin?: s
 /** Consecutive failed page reads before the driver gives up (about 20s at 500ms). */
 export const MAX_STATE_ERRORS = 40;
 
-/** With a stored TOTP seed, a push prompt is swapped for a code: these, in order. */
-export const OTHER_WAY_LINKS = ["i can't use my microsoft authenticator app right now", "use a verification code"];
+/**
+ * With a stored TOTP seed, a push or passkey prompt is swapped for a typed code by
+ * clicking the first of these that is on the page (best first). At most MAX_WALK clicks.
+ */
+export const OTHER_WAY_LINKS = ["use a verification code", "i can't use my microsoft authenticator app right now", "sign in another way", "other ways to sign in"];
+const MAX_WALK = 6;
 
 export const SIGNIN_BUTTONS = ["next", "sign in", "yes", "verify", "continue"];
 export const APPROVE_BUTTONS = ["confirm and continue", "allow access", "allow", "continue"];
@@ -71,6 +80,7 @@ export function stateExpr(buttons: string[]): string {
     `else if(has(i=>i.autocomplete==='one-time-code'||/^(otc|otp|totp|code)$/i.test(i.name||'')))kind='otp';` +
     `else if(has(i=>i.type==='email'||/^(loginfmt|username|email|login)$/i.test(i.name||'')))kind='username';` +
     `if(kind==='unknown'&&/request approved|you can close this|access (?:allowed|granted)/.test(body))kind='approved';` +
+    `if(kind==='unknown'&&/face, fingerprint, pin or security key|use your passkey|security key/.test(body))kind='passkey';` +
     `let number;if(kind==='unknown'&&/approve (?:the |your )?sign.in request|open your authenticator app/.test(body)){kind='push';` +
     `const n=pierce('#idRichContext_DisplaySign,.displaySign,[data-testid=displaySign]').map(e=>(e.innerText||'').trim()).find(t=>/^\\d{2,3}$/.test(t));if(n)number=n}` +
     `const allow=${JSON.stringify(buttons)};let button;` +
@@ -82,7 +92,7 @@ export function stateExpr(buttons: string[]): string {
 /** Clicks the first visible button whose text is exactly `text` (already allowlisted by the caller). */
 export function clickExpr(text: string): string {
   return `(()=>{const vis=${VISIBLE_FN};const pierce=${ALL_FN};` +
-    `for(const b of pierce('button,input[type=submit],[role=button],a,[data-value]')){if(!vis(b))continue;` +
+    `for(const b of pierce('button,input[type=submit],[role=button],[role=link],a,[data-value]')){if(!vis(b))continue;` +
     `if((b.innerText||b.value||'').trim().toLowerCase().replace(/[\u2018\u2019]/g,"'")===${JSON.stringify(text)}){b.click();return true}}return false})()`;
 }
 
@@ -108,7 +118,7 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
   let passwordTyped = 0, usernameTyped = 0, codeTyped = 0;
   let lastOrigin = "";
   let stateErrors = 0;
-  let otherWay = 0;
+  let walking = false, codeChosen = false, walkClicks = 0, reopened = 0;
   const errSeen = new Set<string>();
   while (d.now() < deadline) {
     if (d.finished()) return { ok: true };
@@ -132,14 +142,27 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
     seen.set(key, n);
     // A push approval is waited out to the overall timeout: a person approves it on their phone.
     if (n > 12 && s.kind !== "push") return { ok: false, reason: `stuck_on_${s.kind}`, origin: s.origin };
-    if (s.kind === "push" && onSignin && o.hasTotp && otherWay < OTHER_WAY_LINKS.length) {
-      // Prefer a code we can type over a phone tap: walk the "sign in another way" links.
-      for (; otherWay < OTHER_WAY_LINKS.length; otherWay++) {
-        if (await d.click(OTHER_WAY_LINKS[otherWay]!)) { d.log?.(`chose: ${OTHER_WAY_LINKS[otherWay]}`); await d.sleep(1200); }
+    const onFamily = onSignin || (o.signinAltOrigins ?? []).includes(s.origin);
+    const wantsOtherWay = s.kind === "push" || s.kind === "passkey" || (walking && (s.kind === "unknown" || s.kind === "button"));
+    if (onFamily && o.hasTotp && wantsOtherWay && walkClicks < MAX_WALK && !codeChosen) {
+      // Prefer a code we can type over a phone tap or a passkey: walk the "another way" links.
+      walking = true;
+      let clicked = "";
+      for (const t of OTHER_WAY_LINKS) if (await d.click(t)) { clicked = t; break; }
+      if (clicked) {
+        walkClicks++;
+        if (clicked === "use a verification code") { codeChosen = true; walking = false; }
+        d.log?.(`chose: ${clicked}`);
+        await d.sleep(1500);
+        continue;
       }
+    }
+    if (s.kind === "passkey" && onFamily) {
+      if (!o.hasTotp) return { ok: false, reason: "passkey_required", origin: s.origin };
+      await d.sleep(750);
       continue;
     }
-    if (s.kind === "push" && onSignin) {
+    if (s.kind === "push" && onFamily) {
       const said = `push:${s.number ?? ""}`;
       if (!errSeen.has(said)) {
         errSeen.add(said);
@@ -153,6 +176,14 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
     if (s.kind === "approved" && onApprove) {
       // The CLI polls the token endpoint; give it a moment to notice.
       await d.sleep(1000);
+      continue;
+    }
+    if (onApprove && s.kind === "unknown" && n === 6 && d.reopenDevice && reopened < 2) {
+      // Signed in but parked on the portal home: go back to the device page.
+      reopened++;
+      d.log?.("back to the device approval page");
+      await d.reopenDevice();
+      await d.sleep(2000);
       continue;
     }
     if (!onSignin && !onApprove) { await d.sleep(750); continue; }
@@ -191,7 +222,7 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
       await d.sleep(2000);
       continue;
     }
-    if (s.kind === "button" && s.button) {
+    if (s.kind === "button" && s.button && !walking) {
       const allowed = onSignin ? SIGNIN_BUTTONS : APPROVE_BUTTONS;
       if (allowed.includes(s.button)) {
         await d.click(s.button);

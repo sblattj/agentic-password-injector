@@ -88,11 +88,12 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
       fill: fillers.fill,
       totp: fillers.totp,
       click: (t) => onTab((s) => clickButton(s, t)).catch(() => false),
+      reopenDevice: () => onTab((s) => s("Page.navigate", { url: flow.url })).then(() => undefined, () => undefined),
       sleep: (ms) => Bun.sleep(ms),
       now: () => Date.now(),
       finished: () => exited !== undefined,
       log: o.log,
-    }, { signinOrigin: new URL(l.signinOrigin).origin, approveOrigins, timeoutMs: timeoutS * 1000, hasTotp: keychainHasTotp(l.credential) });
+    }, { signinOrigin: new URL(l.signinOrigin).origin, signinAltOrigins: (l.signinAltOrigins ?? []).map((u) => new URL(u).origin), approveOrigins, timeoutMs: timeoutS * 1000, hasTotp: keychainHasTotp(l.credential) });
 
     if (!res.ok && res.reason.startsWith("stuck_on_")) {
       const seen = await onTab(describePage).catch(() => "");

@@ -231,5 +231,52 @@ test("drive: with a stored seed, a push prompt is swapped for a typed code", asy
   };
   const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 1, hasTotp: true });
   expect(r).toEqual({ ok: true });
-  expect(calls.slice(0, 3)).toEqual(["click:i can't use my microsoft authenticator app right now", "click:use a verification code", "totp"]);
+  expect(calls.slice(0, 2)).toEqual(["click:use a verification code", "totp"]);
+});
+
+test("drive: a passkey page on an alt origin is walked to a verification code; nothing typed there", async () => {
+  const ALT = "https://login.alt.example";
+  const calls: string[] = [];
+  let page = "passkey", done = false;
+  const present: Record<string, string[]> = { passkey: ["sign in another way"], methods: ["use a verification code"] };
+  const d: DriverDeps = {
+    state: async () => page === "passkey" ? { origin: ALT, kind: "passkey" } as PageState
+      : page === "methods" ? { origin: ALT, kind: "unknown" } as PageState
+      : page === "otp" ? { origin: SIGNIN, kind: "otp" } as PageState
+      : { origin: APPROVE, kind: "button", button: "allow access" } as PageState,
+    fill: async (f) => { calls.push(`fill:${f}`); return { filled: true }; },
+    totp: async () => { calls.push("totp"); page = "approve"; return { filled: true }; },
+    click: async (t) => {
+      if (t === "allow access") { done = true; calls.push(`click:${t}`); return true; }
+      if (!(present[page] ?? []).includes(t)) return false;
+      calls.push(`click:${t}`);
+      page = t === "sign in another way" ? "methods" : "otp";
+      return true;
+    },
+    sleep: async () => {}, now: () => 0, finished: () => done,
+  };
+  const r = await drive(d, { signinOrigin: SIGNIN, signinAltOrigins: [ALT], approveOrigins: [APPROVE], timeoutMs: 1, hasTotp: true });
+  expect(r).toEqual({ ok: true });
+  expect(calls).toEqual(["click:sign in another way", "click:use a verification code", "totp", "click:allow access"]);
+});
+
+test("drive: a passkey page without a seed stops as passkey_required", async () => {
+  const { d, calls } = fakePage([{ origin: SIGNIN, kind: "passkey" }]);
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: false });
+  expect(r).toEqual({ ok: false, reason: "passkey_required", origin: SIGNIN });
+  expect(calls).toEqual([]);
+});
+
+test("drive: parked on the approval origin's home page, the device URL is reopened", async () => {
+  let reopened = 0, done = false;
+  const d: DriverDeps = {
+    state: async () => reopened ? { origin: APPROVE, kind: "button", button: "allow access" } as PageState : { origin: APPROVE, kind: "unknown" } as PageState,
+    fill: async () => ({ filled: true }), totp: async () => ({ filled: true }),
+    click: async (t) => { if (t === "allow access") done = true; return true; },
+    reopenDevice: async () => { reopened++; },
+    sleep: async () => {}, now: () => 0, finished: () => done,
+  };
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 1, hasTotp: false });
+  expect(r).toEqual({ ok: true });
+  expect(reopened).toBe(1);
 });
