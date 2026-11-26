@@ -4,7 +4,7 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, linkKeychains, load, pick, save, toggleTarget, validate, type Registry } from "../src/accounts/config.ts";
 import { loginArgs, parseDeviceFlow, parseUsage, parseWhoami } from "../src/accounts/kiro.ts";
-import { drive, stateExpr, type DriverDeps, type PageState } from "../src/accounts/drive.ts";
+import { drive, pickExpr, stateExpr, type DriverDeps, type PageState } from "../src/accounts/drive.ts";
 import { homeConflict, loginAccount } from "../src/accounts/login.ts";
 import { bestOf } from "../src/accounts/cli.ts";
 
@@ -140,6 +140,47 @@ test("drive: username, password, approve, allow, in order, password typed once",
   expect(calls.filter((c) => c.startsWith("fill"))).toEqual(["fill:username", "fill:password"]);
   expect(calls).toContain("click:confirm and continue");
   expect(calls).toContain("click:allow access");
+});
+
+test("drive: an account picker is answered with the expected user's tile, never another", async () => {
+  const picked: string[] = [];
+  let i = 0, t = 0, done = false;
+  const script: PageState[] = [
+    { origin: SIGNIN, kind: "picker" },
+    { origin: SIGNIN, kind: "password", identity: "me@example.com" },
+    { origin: APPROVE, kind: "button", button: "allow access" },
+  ];
+  const d: DriverDeps = {
+    state: async () => script[Math.min(i, script.length - 1)]!,
+    fill: async () => { i++; return { filled: true }; },
+    totp: async () => ({ filled: true }),
+    click: async (text) => { if (text === "allow access") { done = true; } return true; },
+    pick: async (u) => { picked.push(u); i++; return "tile"; },
+    sleep: async (ms) => { t += ms; }, now: () => t, finished: () => done,
+  };
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: false, expectUser: "Me@Example.com" });
+  expect(r).toEqual({ ok: true });
+  expect(picked).toEqual(["me@example.com"]);
+});
+
+test("drive: a picker with no expected user stops instead of guessing", async () => {
+  const { d } = fakePage([{ origin: SIGNIN, kind: "picker" }], { pick: async () => "tile" });
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: false });
+  expect(r).toEqual({ ok: false, reason: "account_picker_needs_expected_user", origin: SIGNIN });
+});
+
+test("drive: a page signing in a different identity (shared browser session) stops before any fill", async () => {
+  const { d, calls } = fakePage([{ origin: SIGNIN, kind: "passkey", identity: "svc@example.com" }]);
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: true, expectUser: "me@example.com" });
+  expect(r).toEqual({ ok: false, reason: "wrong_account_selected", origin: SIGNIN });
+  expect(calls).toEqual([]);
+});
+
+test("pickExpr only clicks an exact data-test-id match or 'use another account'", () => {
+  const e = pickExpr("Me@Example.com");
+  expect(e).toContain('"me@example.com"');
+  expect(e).toContain("===want");
+  expect(e).toContain("use another account");
 });
 
 test("drive: a second password page stops instead of retrying (lockout guard)", async () => {

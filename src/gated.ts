@@ -39,7 +39,7 @@ export type Guard = () => Promise<void>;
 // Reason codes raised as exceptions from inside `run` that must survive the outer
 // catch verbatim instead of collapsing to `tab_unavailable` — the user needs to
 // see WHY nothing was typed.
-export const PASSTHROUGH_REASONS = new Set(["focus_lost", "navigated_during_consent", "request_cancelled"]);
+export const PASSTHROUGH_REASONS = new Set(["focus_lost", "input_dropped", "navigated_during_consent", "request_cancelled"]);
 
 /**
  * A consent callback answers with an outcome, or a plain boolean (auto-approve

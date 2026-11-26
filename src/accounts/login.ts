@@ -5,7 +5,7 @@ import { fillCredential, fillTotp, REAL_DEPS, type Deps } from "../tools.ts";
 import { keychainHasTotp, keychainLookup } from "../vault/keychain.ts";
 import type { FillResult } from "../gated.ts";
 import { homeOf, linkKeychains, type Account, type Registry } from "./config.ts";
-import { APPROVE_BUTTONS, SIGNIN_BUTTONS, clickButton, describePage, drive, readState, type DriveResult, type PageState } from "./drive.ts";
+import { APPROVE_BUTTONS, SIGNIN_BUTTONS, clickButton, describePage, pickAccount, drive, readState, type DriveResult, type PageState } from "./drive.ts";
 import { launchAccountBrowser, openTab, waitForFirstLoad } from "./browser.ts";
 import { startDeviceLogin, whoami, type Runner, realRunner } from "./kiro.ts";
 import { spawnSync } from "node:child_process";
@@ -88,12 +88,13 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
       fill: fillers.fill,
       totp: fillers.totp,
       click: (t) => onTab((s) => clickButton(s, t)).catch(() => false),
+      pick: (u) => onTab((s) => pickAccount(s, u)).catch(() => false as const),
       reopenDevice: () => onTab((s) => s("Page.navigate", { url: flow.url })).then(() => undefined, () => undefined),
       sleep: (ms) => Bun.sleep(ms),
       now: () => Date.now(),
       finished: () => exited !== undefined,
       log: o.log,
-    }, { signinOrigin: new URL(l.signinOrigin).origin, signinAltOrigins: (l.signinAltOrigins ?? []).map((u) => new URL(u).origin), approveOrigins, timeoutMs: timeoutS * 1000, hasTotp: keychainHasTotp(l.credential) });
+    }, { signinOrigin: new URL(l.signinOrigin).origin, signinAltOrigins: (l.signinAltOrigins ?? []).map((u) => new URL(u).origin), approveOrigins, timeoutMs: timeoutS * 1000, hasTotp: keychainHasTotp(l.credential), expectUser: expect });
 
     if (!res.ok && res.reason.startsWith("stuck_on_")) {
       const seen = await onTab(describePage).catch(() => "");

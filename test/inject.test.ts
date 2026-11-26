@@ -27,7 +27,7 @@ test("chooseFields returns pass-only when no user field precedes", () => {
 interface Call { method: string; params: any }
 
 /** A stub tab. `focusHolds` decides what the post-focus verification observes. */
-function mkSend(opts: { objectId?: string | null; focusHolds: boolean | (() => boolean) }) {
+function mkSend(opts: { objectId?: string | null; focusHolds: boolean | (() => boolean); lands?: boolean }) {
   const calls: Call[] = [];
   const send: Send = (async (method: string, params: any = {}) => {
     calls.push({ method, params });
@@ -35,6 +35,7 @@ function mkSend(opts: { objectId?: string | null; focusHolds: boolean | (() => b
       return { result: { objectId: opts.objectId === undefined ? "OBJ-1" : opts.objectId } };
     }
     if (method === "Runtime.callFunctionOn") {
+      if (String(params.functionDeclaration).includes("this.value.length")) return { result: { value: opts.lands ?? true } };
       const isCheck = String(params.functionDeclaration).includes("document.activeElement");
       if (!isCheck) return { result: { value: undefined } }; // the focus/scroll call
       const holds = typeof opts.focusHolds === "function" ? opts.focusHolds() : opts.focusHolds;
@@ -67,9 +68,10 @@ test("I4: the verification happens AFTER the focus call and BEFORE the insert", 
   await typeIntoField(send, "#pw", SECRET);
   const order = calls.map((c) =>
     c.method === "Runtime.callFunctionOn"
-      ? (String(c.params.functionDeclaration).includes("document.activeElement") ? "verify" : "focus")
+      ? (String(c.params.functionDeclaration).includes("this.value.length") ? "landed"
+        : String(c.params.functionDeclaration).includes("document.activeElement") ? "verify" : "focus")
       : c.method);
-  expect(order).toEqual(["Runtime.evaluate", "focus", "verify", "Input.insertText"]);
+  expect(order).toEqual(["Runtime.evaluate", "focus", "verify", "Input.insertText", "landed"]);
 });
 
 test("I4: the focus check is boolean-only — it never reads the field's value", async () => {
@@ -133,7 +135,7 @@ test("M3: the guard is the LAST thing before Input.insertText", async () => {
   await typeIntoField(send, "#pw", SECRET, async () => { atGuard = calls.map((c) => c.method); });
   expect(atGuard).toEqual(["Runtime.evaluate", "Runtime.callFunctionOn", "Runtime.callFunctionOn"]);
   expect(atGuard).not.toContain("Input.insertText");
-  expect(calls.map((c) => c.method)).toEqual([...atGuard, "Input.insertText"]);
+  expect(calls.map((c) => c.method)).toEqual([...atGuard, "Input.insertText", "Runtime.callFunctionOn"]);
 });
 
 test("M3: the guard is consulted exactly once, and a passing guard still fills", async () => {
@@ -396,7 +398,8 @@ test("CLEAR: the focus round-trip also empties the field, in ONE call", async ()
   expect(fn).toContain("getOwnPropertyDescriptor"); // the native setter, for React
   expect(fn).toContain("'input'");                  // …and the event that syncs it
   // One call, so the guard→insert window (M3) does not grow.
-  expect(calls.filter((c) => c.method === "Runtime.callFunctionOn")).toHaveLength(2);
+  const beforeInsert = calls.slice(0, calls.findIndex((c) => c.method === "Input.insertText"));
+  expect(beforeInsert.filter((c) => c.method === "Runtime.callFunctionOn")).toHaveLength(2);
 });
 
 test("CLEAR: emptying the field never sends the secret to the page early", async () => {
@@ -422,8 +425,17 @@ test("EVENTS: nothing extra is dispatched by default", async () => {
   await typeIntoField(send, "#pw", SECRET);
   expect(evented(calls)).toEqual([]);
   expect(calls.map((c) => c.method)).toEqual([
-    "Runtime.evaluate", "Runtime.callFunctionOn", "Runtime.callFunctionOn", "Input.insertText",
+    "Runtime.evaluate", "Runtime.callFunctionOn", "Runtime.callFunctionOn", "Input.insertText", "Runtime.callFunctionOn",
   ]);
+});
+
+test("DROPPED: a field still empty after the insert (hidden tab) throws input_dropped, never filled", async () => {
+  const { send, calls } = mkSend({ focusHolds: true, lands: false });
+  await expect(typeIntoField(send, "#pw", SECRET)).rejects.toThrow("input_dropped");
+  const landed = calls.filter((c) => String(c.params.functionDeclaration ?? "").includes("this.value.length"));
+  expect(landed).toHaveLength(1);
+  // The check is boolean-only: it never returns or carries the value.
+  expect(JSON.stringify(landed)).not.toContain(SECRET);
 });
 
 test("EVENTS: opting in fires keydown/keypress/keyup/change AFTER the insert", async () => {

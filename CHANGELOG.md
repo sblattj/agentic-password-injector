@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A fill into a background tab (`document.visibilityState` hidden) no longer
+  reports `filled: true`: the browser drops `Input.insertText` there, so every
+  fill now checks the field is non-empty afterwards (a boolean, never the value)
+  and fails with `input_dropped`.
+- `apinj-accounts login` answers an IdP account picker ("Pick an account") with
+  the tile for the credential's own username, or "use another account", never
+  another remembered account; a page that is signing in a different identity
+  stops the run with `wrong_account_selected` before anything is typed.
 - `apinj-accounts` links each account HOME's `Library/Keychains` to the real
   one, so a keychain call under that HOME no longer pops macOS's "Keychain Not
   Found ... Reset To Defaults" dialog. A pinned account needs no saved

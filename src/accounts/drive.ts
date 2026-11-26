@@ -20,15 +20,19 @@ const ALL_FN =
 
 /** `passkey`: the IdP offers a passkey / security key (never used here). */
 /** `push`: the IdP waits for an authenticator-app approval; `number` is the one to match, if shown. */
-export type PageKind = "username" | "password" | "otp" | "push" | "passkey" | "approved" | "button" | "unknown";
+/** `picker`: the IdP lists several remembered accounts ("Pick an account"); one must be chosen explicitly. */
+export type PageKind = "username" | "password" | "otp" | "push" | "passkey" | "picker" | "approved" | "button" | "unknown";
 
-export interface PageState { origin: string; kind: PageKind; button?: string; number?: string }
+/** `identity`: the account the IdP page says it is signing in (its header), lower-cased; never an input value. */
+export interface PageState { origin: string; kind: PageKind; button?: string; number?: string; identity?: string }
 
 export interface DriverDeps {
   state: () => Promise<PageState | null>;
   fill: (field: "username" | "password") => Promise<FillResult>;
   totp: () => Promise<FillResult>;
   click: (text: string) => Promise<boolean>;
+  /** On an account picker: click the tile for `user`, else "use another account". Never another tile. */
+  pick?: (user: string) => Promise<"tile" | "other" | false>;
   /** Load the device-approval URL again (the IdP redirect can land on the portal home instead). */
   reopenDevice?: () => Promise<void>;
   /** Called once per push-approval prompt (and again if the number changes). */
@@ -48,6 +52,12 @@ export interface DriveOptions {
   approveOrigins: string[];
   timeoutMs: number;
   hasTotp: boolean;
+  /**
+   * The account this run must sign in as (the credential's username). With it, an
+   * account picker is answered with exactly that tile, and an IdP page that shows a
+   * different identity stops the run instead of signing the wrong account in.
+   */
+  expectUser?: string;
 }
 
 export type DriveResult = { ok: true } | { ok: false; reason: string; origin?: string };
@@ -79,6 +89,7 @@ export function stateExpr(buttons: string[]): string {
     `if(has(i=>i.type==='password'))kind='password';` +
     `else if(has(i=>i.autocomplete==='one-time-code'||/^(otc|otp|totp|code)$/i.test(i.name||'')))kind='otp';` +
     `else if(has(i=>i.type==='email'||/^(loginfmt|username|email|login)$/i.test(i.name||'')))kind='username';` +
+    `if(kind==='unknown'&&/pick an account/.test(body)&&pierce('[data-test-id]').some(e=>vis(e)&&/@/.test(e.getAttribute('data-test-id'))))kind='picker';` +
     `if(kind==='unknown'&&/request approved|you can close this|access (?:allowed|granted)/.test(body))kind='approved';` +
     `if(kind==='unknown'&&/face, fingerprint, pin or security key|use your passkey|security key/.test(body))kind='passkey';` +
     `let number;if(kind==='unknown'&&/approve (?:the |your )?sign.in request|open your authenticator app/.test(body)){kind='push';` +
@@ -86,7 +97,9 @@ export function stateExpr(buttons: string[]): string {
     `const allow=${JSON.stringify(buttons)};let button;` +
     `if(kind==='unknown'){for(const b of pierce('button,input[type=submit],[role=button]')){if(!vis(b))continue;` +
     `const t=(b.innerText||b.value||'').trim().toLowerCase();if(allow.includes(t)){button=t;break}}if(button)kind='button'}` +
-    `return {origin:location.origin,kind,button,number}})()`;
+    `const idEl=pierce('#displayName,.identity,[data-testid=identity]').find(vis);` +
+    `const identity=idEl?((idEl.innerText||'').trim().toLowerCase().match(/^[^\\s@]+@[^\\s@]+$/)||[])[0]:undefined;` +
+    `return {origin:location.origin,kind,button,number,identity}})()`;
 }
 
 /** Clicks the first visible button whose text is exactly `text` (already allowlisted by the caller). */
@@ -94,6 +107,23 @@ export function clickExpr(text: string): string {
   return `(()=>{const vis=${VISIBLE_FN};const pierce=${ALL_FN};` +
     `for(const b of pierce('button,input[type=submit],[role=button],[role=link],a,[data-value]')){if(!vis(b))continue;` +
     `if((b.innerText||b.value||'').trim().toLowerCase().replace(/[\u2018\u2019]/g,"'")===${JSON.stringify(text)}){b.click();return true}}return false})()`;
+}
+
+/**
+ * Clicks the picker tile whose data-test-id is exactly `user` (case-folded), else
+ * "use another account". Returns which, or false. Never clicks any other tile.
+ */
+export function pickExpr(user: string): string {
+  return `(()=>{const vis=${VISIBLE_FN};const pierce=${ALL_FN};const want=${JSON.stringify(user.toLowerCase())};` +
+    `const tile=pierce('[data-test-id]').find(e=>vis(e)&&(e.getAttribute('data-test-id')||'').toLowerCase()===want);` +
+    `if(tile){tile.click();return 'tile'}` +
+    `for(const b of pierce('[role=button],button,div,a')){if(!vis(b))continue;if((b.innerText||'').trim().toLowerCase()==='use another account'){b.click();return 'other'}}` +
+    `return false})()`;
+}
+
+export async function pickAccount(send: Send, user: string): Promise<"tile" | "other" | false> {
+  const r = await send<{ result: { value?: "tile" | "other" | false } }>("Runtime.evaluate", { expression: pickExpr(user), returnByValue: true });
+  return r?.result?.value ?? false;
 }
 
 export async function readState(send: Send, buttons: string[]): Promise<PageState | null> {
@@ -143,6 +173,20 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
     // A push approval is waited out to the overall timeout: a person approves it on their phone.
     if (n > 12 && s.kind !== "push") return { ok: false, reason: `stuck_on_${s.kind}`, origin: s.origin };
     const onFamily = onSignin || (o.signinAltOrigins ?? []).includes(s.origin);
+    const want = o.expectUser?.toLowerCase();
+    if (onFamily && want && s.identity && s.identity !== want) {
+      // The IdP picked a remembered session for someone else (a shared browser). Typing
+      // anything here would sign that account in; stop and say so.
+      return { ok: false, reason: "wrong_account_selected", origin: s.origin };
+    }
+    if (s.kind === "picker" && onFamily) {
+      if (!want || !d.pick) return { ok: false, reason: "account_picker_needs_expected_user", origin: s.origin };
+      const r = await d.pick(want);
+      if (!r) return { ok: false, reason: "account_picker_no_match", origin: s.origin };
+      d.log?.(r === "tile" ? "picked the expected account" : "chose: use another account");
+      await d.sleep(1500);
+      continue;
+    }
     const wantsOtherWay = s.kind === "push" || s.kind === "passkey" || (walking && (s.kind === "unknown" || s.kind === "button"));
     if (onFamily && o.hasTotp && wantsOtherWay && walkClicks < MAX_WALK && !codeChosen) {
       // Prefer a code we can type over a phone tap or a passkey: walk the "another way" links.

@@ -110,6 +110,9 @@ async function resolveObjectId(send: Send, selector: string): Promise<string> {
  * tempting "fix" is to drop the check that makes injection safe at all. So walk
  * down through `shadowRoot.activeElement` and compare at the bottom.
  */
+/** After the insert: did anything land? Returns a boolean only, never the value. */
+const LANDED_CHECK = "function(){return typeof this.value==='string'&&this.value.length>0}";
+
 const FOCUS_CHECK =
   "function(){let a=document.activeElement;" +
   "while(a&&a.shadowRoot&&a.shadowRoot.activeElement)a=a.shadowRoot.activeElement;" +
@@ -258,6 +261,17 @@ export async function typeIntoField(
   // no branch in which the insert below runs on an unverified document.
   await guard();
   await send("Input.insertText", { text: value }); // real keystrokes; value never returned
+  // A background tab (document.visibilityState 'hidden', e.g. any non-active tab
+  // of a windowed browser) silently drops Input.insertText: focus checks pass and
+  // the field stays empty. Report that instead of {filled:true}.
+  const landed = await send<{ result: { value?: boolean } }>("Runtime.callFunctionOn", {
+    objectId,
+    functionDeclaration: LANDED_CHECK,
+    returnByValue: true,
+  }).catch(() => null);
+  if (value.length > 0 && landed?.result?.value === false) {
+    throw new CdpError("input_dropped", `nothing landed in ${selector} (is the tab hidden?)`);
+  }
   // After the secret is out. Carries no secret itself, so no guard is needed —
   // and a failure here must not be reported as "nothing was typed", because the
   // keystroke above already landed.
