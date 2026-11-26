@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -110,4 +110,26 @@ export function toggleTarget(r: Registry): string {
   const names = Object.keys(r.accounts);
   if (names.length !== 2) throw new ConfigError(`bare swap needs exactly two accounts (have ${names.length}); name one`);
   return names[0] === r.active ? names[1]! : names[0]!;
+}
+
+/**
+ * Point <home>/Library/Keychains at the real one. macOS finds the login keychain
+ * through HOME, so without this any keychain call under the account's HOME (kiro-cli
+ * or a tool it starts) pops a "Keychain Not Found ... Reset To Defaults" dialog, and
+ * a reset would wipe the real login keychain. Kiro's own login tokens live in its
+ * data dir, not the keychain, so accounts stay separate. Never touches a pinned HOME.
+ */
+export function linkKeychains(a: Account, realHome = homedir()): "linked" | "present" | "skipped" {
+  const home = homeOf(a);
+  if (a.pinned || resolve(home) === resolve(realHome)) return "skipped";
+  const lib = join(home, "Library");
+  const link = join(lib, "Keychains");
+  if (existsSync(link) || lstatExists(link)) return "present";
+  mkdirSync(lib, { recursive: true, mode: 0o700 });
+  symlinkSync(join(realHome, "Library", "Keychains"), link);
+  return "linked";
+}
+
+function lstatExists(p: string): boolean {
+  try { lstatSync(p); return true; } catch { return false; }
 }

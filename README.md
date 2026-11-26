@@ -334,6 +334,11 @@ APINJ_ACCOUNT=svc ~/.local/bin/apinj/kiro-cli whoami   # pick the account per pr
 
 How it stays safe:
 
+- **The login keychain stays reachable.** macOS finds the login keychain
+  through HOME, so a bare account HOME makes any keychain call (the CLI's or a
+  tool it starts) pop "Keychain Not Found ... Reset To Defaults". `add`, `home`,
+  `run` and `login` link `<account HOME>/Library/Keychains` to the real one.
+  Never click Reset To Defaults: it replaces your login keychain.
 - **No secret in the registry.** `~/.config/apinj-accounts/accounts.json`
   (0600) holds names, HOME paths, the IdP settings and the *name* of each
   Keychain entry. The manager reads only the entry's attributes (the username,

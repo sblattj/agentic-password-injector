@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, mkdtempSync, readFileSync, readlinkSync, statSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
-import { ConfigError, load, pick, save, toggleTarget, validate, type Registry } from "../src/accounts/config.ts";
+import { ConfigError, linkKeychains, load, pick, save, toggleTarget, validate, type Registry } from "../src/accounts/config.ts";
 import { loginArgs, parseDeviceFlow, parseUsage, parseWhoami } from "../src/accounts/kiro.ts";
 import { drive, stateExpr, type DriverDeps, type PageState } from "../src/accounts/drive.ts";
 import { homeConflict, loginAccount } from "../src/accounts/login.ts";
@@ -176,4 +176,15 @@ test("stateExpr reads presence and button text only, never .value of a text fiel
   // b.value is only read for input[type=submit] captions in the button loop.
   expect(e.match(/\.value/g)?.length).toBe(1);
   expect(e).toContain("b.innerText||b.value");
+});
+
+test("linkKeychains: account HOME gets Library/Keychains -> the real one; pinned and real HOME untouched", () => {
+  const root = mkdtempSync(join(tmpdir(), "apinj-kc-"));
+  const real = join(root, "real"), home = join(root, "svc", "home");
+  expect(linkKeychains({ tool: "kiro", home }, real)).toBe("linked");
+  expect(lstatSync(join(home, "Library", "Keychains")).isSymbolicLink()).toBe(true);
+  expect(readlinkSync(join(home, "Library", "Keychains"))).toBe(join(real, "Library", "Keychains"));
+  expect(linkKeychains({ tool: "kiro", home }, real)).toBe("present");
+  expect(linkKeychains({ tool: "kiro", home: join(root, "p"), pinned: true }, real)).toBe("skipped");
+  expect(linkKeychains({ tool: "kiro", home: real }, real)).toBe("skipped");
 });

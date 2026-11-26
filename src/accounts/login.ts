@@ -4,7 +4,7 @@ import { withConn, resolveTarget, type Send } from "../cdp.ts";
 import { fillCredential, fillTotp, REAL_DEPS, type Deps } from "../tools.ts";
 import { keychainHasTotp, keychainLookup } from "../vault/keychain.ts";
 import type { FillResult } from "../gated.ts";
-import { homeOf, type Account, type Registry } from "./config.ts";
+import { homeOf, linkKeychains, type Account, type Registry } from "./config.ts";
 import { APPROVE_BUTTONS, SIGNIN_BUTTONS, clickButton, drive, readState, type DriveResult, type PageState } from "./drive.ts";
 import { launchAccountBrowser, openTab } from "./browser.ts";
 import { startDeviceLogin, whoami, type Runner, realRunner } from "./kiro.ts";
@@ -53,6 +53,7 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
   const l = a.login;
   if (!l?.credential || !l.signinOrigin) return { ok: false, reason: "login.credential and login.signinOrigin are required for auto-login" };
   const home = homeOf(a);
+  linkKeychains(a);
 
   // Identity the account must end up as: the Keychain entry's username (attributes only, no secret).
   const cred = await keychainLookup(l.credential).catch(() => null);

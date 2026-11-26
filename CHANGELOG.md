@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `apinj-accounts` links each account HOME's `Library/Keychains` to the real
+  one, so a keychain call under that HOME no longer pops macOS's "Keychain Not
+  Found ... Reset To Defaults" dialog. A pinned account needs no saved
+  credential (`add --pinned` no longer defaults one).
+
 ### Added
 
 - `apinj-accounts`, an account manager for CLI tools that have one login per

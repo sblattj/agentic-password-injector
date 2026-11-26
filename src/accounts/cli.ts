@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  ACCOUNT_NAME_RE, ConfigError, configPath, dataRoot, homeOf, load, pick, save, toggleTarget,
+  ACCOUNT_NAME_RE, ConfigError, configPath, dataRoot, homeOf, linkKeychains, load, pick, save, toggleTarget,
   type Account, type Registry,
 } from "./config.ts";
 import { dataDir, usage, whoami, type Usage } from "./kiro.ts";
@@ -86,6 +86,7 @@ async function main(argv: string[]): Promise<number> {
     if (dd < 0 || dd === args.length - 1) throw new ConfigError("usage: run [name] -- CMD ARGS...");
     const r = load(cfg);
     const [, a] = pick(r, dd > 0 ? args[0] : undefined);
+    linkKeychains(a);
     const res = spawnSync(args[dd + 1]!, args.slice(dd + 2), { stdio: "inherit", env: { ...process.env, HOME: homeOf(a) } });
     return res.status ?? 1;
   }
@@ -108,14 +109,14 @@ async function main(argv: string[]): Promise<number> {
         license: (opt(args, "--license") ?? base?.login?.license ?? "pro") as "pro" | "free",
         startUrl: opt(args, "--start-url") ?? base?.login?.startUrl,
         region: opt(args, "--region") ?? base?.login?.region,
-        credential: opt(args, "--credential") ?? `kiro-${name}`,
+        credential: opt(args, "--credential") ?? (pinned ? undefined : `kiro-${name}`),
         signinOrigin: opt(args, "--signin-origin") ?? base?.login?.signinOrigin,
       };
       const a: Account = { tool: "kiro", home, login, ...(pinned ? { pinned: true } : { browserProfile: join(dir, "browser") }) };
       const next: Registry = { ...r, accounts: { ...r.accounts, [name]: a }, active: r.active ?? name };
       const c = homeConflict(next, name);
       if (c) throw new ConfigError(`add: ${c}`);
-      if (!pinned) mkdirSync(homeOf(a), { recursive: true, mode: 0o700 });
+      if (!pinned) { mkdirSync(homeOf(a), { recursive: true, mode: 0o700 }); linkKeychains(a); }
       save(next, cfg);
       out(`added ${name}${pinned ? " (pinned)" : ""}: HOME=${homeOf(a)}`);
       return 0;
@@ -132,7 +133,7 @@ async function main(argv: string[]): Promise<number> {
       if (json) { out(JSON.stringify(rows, null, 2)); return 0; }
       for (const x of rows)
         out(`${x.active ? "*" : " "} ${x.name.padEnd(12)} ${x.loggedIn ? `logged in as ${x.email ?? "?"}` : "not logged in"}` +
-          `${x.pinned ? "  [pinned]" : ""}  cred ${x.credential ?? "-"}${x.credentialSaved ? "" : " (not saved)"}  HOME=${x.home}`);
+          `${x.pinned ? "  [pinned]" : ""}  cred ${x.credential ?? "-"}${x.credential && !x.credentialSaved ? " (not saved)" : ""}  HOME=${x.home}`);
       if (!rows.length) out("no accounts (apinj-accounts add <name>)");
       return 0;
     }
@@ -157,7 +158,7 @@ async function main(argv: string[]): Promise<number> {
       return 0;
     }
     case "current": out(r.active ?? "(none)"); return 0;
-    case "home": out(homeOf(pick(r, args[0])[1])); return 0;
+    case "home": { const a = pick(r, args[0])[1]; linkKeychains(a); out(homeOf(a)); return 0; }
     case "data-dir": out(dataDir(homeOf(pick(r, args[0])[1]))); return 0;
     case "whoami": {
       const [n, a] = pick(r, args[0]);
