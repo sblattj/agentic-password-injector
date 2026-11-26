@@ -14,7 +14,7 @@ const ALL_FN =
 // `fill("password")` / `totp()` and gets back {filled, reason?}.
 //
 // What it does by itself is CLICK, and only on the two origins it was given
-// (the IdP's sign-in origin and the device-approval origin), only on buttons
+// (the IdP's sign-in origin and the device-approval origins), only on buttons
 // whose visible text is on a short allowlist. Anything else is waited out and,
 // if it persists, reported by origin.
 
@@ -34,7 +34,13 @@ export interface DriverDeps {
   log?: (line: string) => void;
 }
 
-export interface DriveOptions { signinOrigin: string; approveOrigin: string; timeoutMs: number; hasTotp: boolean }
+export interface DriveOptions {
+  signinOrigin: string;
+  /** Where the device code is approved: the start-URL origin and the IdC region's sign-in origin. */
+  approveOrigins: string[];
+  timeoutMs: number;
+  hasTotp: boolean;
+}
 
 export type DriveResult = { ok: true } | { ok: false; reason: string; origin?: string };
 
@@ -97,7 +103,7 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
     if (!s) { await d.sleep(500); continue; }
     lastOrigin = s.origin;
     const onSignin = s.origin === o.signinOrigin;
-    const onApprove = s.origin === o.approveOrigin;
+    const onApprove = o.approveOrigins.includes(s.origin);
     const key = `${s.origin}|${s.kind}|${s.button ?? ""}`;
     const n = (seen.get(key) ?? 0) + 1;
     seen.set(key, n);

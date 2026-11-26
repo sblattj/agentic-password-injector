@@ -68,8 +68,8 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
   try {
     const flow = await Promise.race([proc.flow, Bun.sleep(30_000).then(() => null)]);
     if (!flow) return { ok: false, reason: "kiro-cli login printed no device URL in 30s" };
-    const approveOrigin = new URL(flow.url).origin;
-    o.log(`device flow started (approval page ${approveOrigin})`);
+    const approveOrigins = [new URL(flow.url).origin, ...(l.region ? [`https://${l.region}.signin.aws`] : [])];
+    o.log(`device flow started (approval on ${approveOrigins.join(" or ")})`);
     const profile = a.browserProfile ? homeOfPath(a.browserProfile) : resolve(home, "..", "browser");
     browser = await launchAccountBrowser(profile, { headed: o.headed });
     process.env.CDP_ENDPOINTS = `${ENDPOINT_NAME}=${browser.base}`;
@@ -90,7 +90,7 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
       now: () => Date.now(),
       finished: () => exited !== undefined,
       log: o.log,
-    }, { signinOrigin: new URL(l.signinOrigin).origin, approveOrigin, timeoutMs: timeoutS * 1000, hasTotp: keychainHasTotp(l.credential) });
+    }, { signinOrigin: new URL(l.signinOrigin).origin, approveOrigins, timeoutMs: timeoutS * 1000, hasTotp: keychainHasTotp(l.credential) });
 
     const code = await Promise.race([proc.done, Bun.sleep(15_000).then(() => "pending" as const)]);
     if (!res.ok) return res;

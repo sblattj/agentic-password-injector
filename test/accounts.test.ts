@@ -135,7 +135,7 @@ test("drive: username, password, approve, allow, in order, password typed once",
     { origin: APPROVE, kind: "button", button: "allow access" },
     { origin: APPROVE, kind: "approved" },
   ]);
-  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigin: APPROVE, timeoutMs: 60_000, hasTotp: false });
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: false });
   expect(r).toEqual({ ok: true });
   expect(calls.filter((c) => c.startsWith("fill"))).toEqual(["fill:username", "fill:password"]);
   expect(calls).toContain("click:confirm and continue");
@@ -147,27 +147,27 @@ test("drive: a second password page stops instead of retrying (lockout guard)", 
   const { d } = fakePage([{ origin: SIGNIN, kind: "password" }], {
     fill: async () => { n++; return { filled: true }; },
   });
-  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigin: APPROVE, timeoutMs: 60_000, hasTotp: false });
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: false });
   expect(r).toEqual({ ok: false, reason: "password_refused", origin: SIGNIN });
   expect(n).toBe(1);
 });
 
 test("drive: never fills or clicks on an origin it was not given", async () => {
   const { d, calls } = fakePage([{ origin: "https://evil.example", kind: "password" }]);
-  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigin: APPROVE, timeoutMs: 20_000, hasTotp: false });
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 20_000, hasTotp: false });
   expect(r.ok).toBe(false);
   expect(calls).toEqual([]);
 });
 
 test("drive: MFA code page without a stored seed reports mfa_code_required", async () => {
   const { d } = fakePage([{ origin: SIGNIN, kind: "otp" }]);
-  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigin: APPROVE, timeoutMs: 60_000, hasTotp: false });
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: false });
   expect(r).toEqual({ ok: false, reason: "mfa_code_required", origin: SIGNIN });
 });
 
 test("drive: a refused fill surfaces the injector's reason", async () => {
   const { d } = fakePage([{ origin: SIGNIN, kind: "username" }], { fill: async () => ({ filled: false, reason: "origin_mismatch" }) });
-  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigin: APPROVE, timeoutMs: 60_000, hasTotp: false });
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: false });
   expect(r).toEqual({ ok: false, reason: "username_origin_mismatch", origin: SIGNIN });
 });
 

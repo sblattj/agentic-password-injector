@@ -52,7 +52,7 @@ test("login driver over the injector fills: secret typed, never logged or return
     click: async (text) => { if (text === "allow access") done = true; return true; },
     sleep: async (ms) => { t += ms; }, now: () => t, finished: () => done,
     log: (s) => logs.push(s),
-  }, { signinOrigin: SIGNIN, approveOrigin: APPROVE, timeoutMs: 60_000, hasTotp: true }).catch((e) => ({ error: String(e) }));
+  }, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 60_000, hasTotp: true }).catch((e) => ({ error: String(e) }));
 
   expect(res).toEqual({ ok: true });
   // Non-vacuous: the secrets DID reach the page.
