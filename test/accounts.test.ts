@@ -188,3 +188,48 @@ test("linkKeychains: account HOME gets Library/Keychains -> the real one; pinned
   expect(linkKeychains({ tool: "kiro", home: join(root, "p"), pinned: true }, real)).toBe("skipped");
   expect(linkKeychains({ tool: "kiro", home: real }, real)).toBe("skipped");
 });
+
+test("drive: a page it cannot read fails as page_unreadable and says why, instead of spinning", async () => {
+  const logs: string[] = [];
+  const { d } = fakePage([{ origin: SIGNIN, kind: "username" }], {
+    state: async () => { throw new Error("no target with id T9"); }, log: (s) => logs.push(s),
+  });
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 600_000, hasTotp: false });
+  expect(r).toEqual({ ok: false, reason: "page_unreadable", origin: undefined });
+  expect(logs).toEqual(["cannot read the page: no target with id T9"]);
+});
+
+test("drive: an authenticator push is waited out (not stuck) and its number reported once", async () => {
+  const logs: string[] = []; const pushes: (string | undefined)[] = [];
+  let reads = 0;
+  const { d } = fakePage([{ origin: SIGNIN, kind: "push", number: "99" }], {
+    state: async () => (++reads > 40 ? { origin: APPROVE, kind: "button", button: "allow access" } : { origin: SIGNIN, kind: "push", number: "99" }),
+    log: (s) => logs.push(s), onPush: (n) => pushes.push(n),
+  });
+  let done = false;
+  d.click = async (t) => { if (t === "allow access") done = true; return true; };
+  d.finished = () => done;
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 600_000, hasTotp: false });
+  expect(r).toEqual({ ok: true });
+  expect(pushes).toEqual(["99"]);
+  expect(logs.filter((l) => l.includes("authenticator"))).toEqual(["waiting for approval in the account's authenticator app: enter 99"]);
+});
+
+test("drive: with a stored seed, a push prompt is swapped for a typed code", async () => {
+  const calls: string[] = [];
+  let stage = 0, done = false;
+  const d: DriverDeps = {
+    state: async () => [
+      { origin: SIGNIN, kind: "push", number: "99" } as PageState,
+      { origin: SIGNIN, kind: "otp" } as PageState,
+      { origin: APPROVE, kind: "button", button: "allow access" } as PageState,
+    ][stage]!,
+    fill: async () => ({ filled: true }),
+    totp: async () => { calls.push("totp"); stage = 2; return { filled: true }; },
+    click: async (t) => { calls.push(`click:${t}`); if (t === "use a verification code") stage = 1; if (t === "allow access") done = true; return true; },
+    sleep: async () => {}, now: () => 0, finished: () => done,
+  };
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 1, hasTotp: true });
+  expect(r).toEqual({ ok: true });
+  expect(calls.slice(0, 3)).toEqual(["click:i can't use my microsoft authenticator app right now", "click:use a verification code", "totp"]);
+});

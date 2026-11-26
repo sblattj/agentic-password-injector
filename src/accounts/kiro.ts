@@ -73,7 +73,7 @@ export function loginArgs(l: KiroLogin): string[] {
   return a;
 }
 
-export interface LoginProc { flow: Promise<DeviceFlow>; done: Promise<number | null>; kill: () => void; log: () => string }
+export interface LoginProc { flow: Promise<DeviceFlow>; done: Promise<number | null>; kill: () => void; signal: () => string | null; log: () => string }
 
 /** Starts the device-flow login under `home` and resolves the URL as soon as kiro-cli prints it. */
 export function startDeviceLogin(home: string, l: KiroLogin, timeoutS: number): LoginProc {
@@ -82,6 +82,7 @@ export function startDeviceLogin(home: string, l: KiroLogin, timeoutS: number): 
     cwd: tmpdir(), env: { ...process.env, HOME: home }, stdio: ["ignore", "pipe", "pipe"],
   });
   let buf = "";
+  let exitSignal: string | null = null;
   let found: ((f: DeviceFlow) => void) | null = null;
   let lost: ((e: Error) => void) | null = null;
   const flow = new Promise<DeviceFlow>((ok, err) => { found = ok; lost = err; });
@@ -93,11 +94,12 @@ export function startDeviceLogin(home: string, l: KiroLogin, timeoutS: number): 
   };
   child.stdout.on("data", onData);
   child.stderr.on("data", onData);
-  const done = new Promise<number | null>((ok) => child.on("exit", (code) => {
+  const done = new Promise<number | null>((ok) => child.on("exit", (code, signal) => {
     if (found && lost) lost(new Error("kiro-cli login exited before printing a device URL"));
+    if (signal) exitSignal = signal;
     ok(code);
   }));
-  return { flow, done, kill: () => child.kill("SIGTERM"), log: () => stripAnsi(buf).replace(/[▰▱]+ Logging in\.\.\./g, "") };
+  return { flow, done, kill: () => child.kill("SIGTERM"), signal: () => exitSignal, log: () => stripAnsi(buf).replace(/[▰▱]+ Logging in\.\.\./g, "") };
 }
 
 export const dataDir = (home: string) => join(home, "Library", "Application Support", "kiro-cli");

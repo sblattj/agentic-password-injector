@@ -5,8 +5,8 @@ import { fillCredential, fillTotp, REAL_DEPS, type Deps } from "../tools.ts";
 import { keychainHasTotp, keychainLookup } from "../vault/keychain.ts";
 import type { FillResult } from "../gated.ts";
 import { homeOf, linkKeychains, type Account, type Registry } from "./config.ts";
-import { APPROVE_BUTTONS, SIGNIN_BUTTONS, clickButton, drive, readState, type DriveResult, type PageState } from "./drive.ts";
-import { launchAccountBrowser, openTab } from "./browser.ts";
+import { APPROVE_BUTTONS, SIGNIN_BUTTONS, clickButton, describePage, drive, readState, type DriveResult, type PageState } from "./drive.ts";
+import { launchAccountBrowser, openTab, waitForFirstLoad } from "./browser.ts";
 import { startDeviceLogin, whoami, type Runner, realRunner } from "./kiro.ts";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -75,6 +75,7 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
     browser = await launchAccountBrowser(profile, { headed: o.headed });
     process.env.CDP_ENDPOINTS = `${ENDPOINT_NAME}=${browser.base}`;
     const tabId = await openTab(browser.base, flow.url);
+    await waitForFirstLoad(browser.base, tabId);
     const tabRef = `endpoint:${ENDPOINT_NAME}/${tabId}`;
     const domain = new URL(l.signinOrigin).hostname;
     const fillers = makeFillers(tabRef, domain, l.credential);
@@ -93,9 +94,13 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
       log: o.log,
     }, { signinOrigin: new URL(l.signinOrigin).origin, approveOrigins, timeoutMs: timeoutS * 1000, hasTotp: keychainHasTotp(l.credential) });
 
+    if (!res.ok && res.reason.startsWith("stuck_on_")) {
+      const seen = await onTab(describePage).catch(() => "");
+      if (seen) o.log(`page it stopped on: ${seen}`);
+    }
     const code = await Promise.race([proc.done, Bun.sleep(15_000).then(() => "pending" as const)]);
     if (!res.ok) return res;
-    if (code !== 0) return { ok: false, reason: `kiro-cli login exited ${code}` };
+    if (code !== 0) return { ok: false, reason: `kiro-cli login exited ${code ?? `on ${proc.signal() ?? "a signal"}`}` };
   } finally {
     proc.kill();
     browser?.stop();

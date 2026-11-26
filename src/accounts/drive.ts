@@ -18,15 +18,18 @@ const ALL_FN =
 // whose visible text is on a short allowlist. Anything else is waited out and,
 // if it persists, reported by origin.
 
-export type PageKind = "username" | "password" | "otp" | "approved" | "button" | "unknown";
+/** `push`: the IdP waits for an authenticator-app approval; `number` is the one to match, if shown. */
+export type PageKind = "username" | "password" | "otp" | "push" | "approved" | "button" | "unknown";
 
-export interface PageState { origin: string; kind: PageKind; button?: string }
+export interface PageState { origin: string; kind: PageKind; button?: string; number?: string }
 
 export interface DriverDeps {
   state: () => Promise<PageState | null>;
   fill: (field: "username" | "password") => Promise<FillResult>;
   totp: () => Promise<FillResult>;
   click: (text: string) => Promise<boolean>;
+  /** Called once per push-approval prompt (and again if the number changes). */
+  onPush?: (number?: string) => void;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
   /** Resolves true once the CLI side reports success (e.g. kiro-cli login exited 0). */
@@ -45,6 +48,12 @@ export interface DriveOptions {
 export type DriveResult = { ok: true } | { ok: false; reason: string; origin?: string };
 
 /** Buttons the driver may press, per page role. Matched on trimmed, case-folded visible text. */
+/** Consecutive failed page reads before the driver gives up (about 20s at 500ms). */
+export const MAX_STATE_ERRORS = 40;
+
+/** With a stored TOTP seed, a push prompt is swapped for a code: these, in order. */
+export const OTHER_WAY_LINKS = ["i can't use my microsoft authenticator app right now", "use a verification code"];
+
 export const SIGNIN_BUTTONS = ["next", "sign in", "yes", "verify", "continue"];
 export const APPROVE_BUTTONS = ["confirm and continue", "allow access", "allow", "continue"];
 
@@ -62,17 +71,19 @@ export function stateExpr(buttons: string[]): string {
     `else if(has(i=>i.autocomplete==='one-time-code'||/^(otc|otp|totp|code)$/i.test(i.name||'')))kind='otp';` +
     `else if(has(i=>i.type==='email'||/^(loginfmt|username|email|login)$/i.test(i.name||'')))kind='username';` +
     `if(kind==='unknown'&&/request approved|you can close this|access (?:allowed|granted)/.test(body))kind='approved';` +
+    `let number;if(kind==='unknown'&&/approve (?:the |your )?sign.in request|open your authenticator app/.test(body)){kind='push';` +
+    `const n=pierce('#idRichContext_DisplaySign,.displaySign,[data-testid=displaySign]').map(e=>(e.innerText||'').trim()).find(t=>/^\\d{2,3}$/.test(t));if(n)number=n}` +
     `const allow=${JSON.stringify(buttons)};let button;` +
     `if(kind==='unknown'){for(const b of pierce('button,input[type=submit],[role=button]')){if(!vis(b))continue;` +
     `const t=(b.innerText||b.value||'').trim().toLowerCase();if(allow.includes(t)){button=t;break}}if(button)kind='button'}` +
-    `return {origin:location.origin,kind,button}})()`;
+    `return {origin:location.origin,kind,button,number}})()`;
 }
 
 /** Clicks the first visible button whose text is exactly `text` (already allowlisted by the caller). */
 export function clickExpr(text: string): string {
   return `(()=>{const vis=${VISIBLE_FN};const pierce=${ALL_FN};` +
-    `for(const b of pierce('button,input[type=submit],[role=button]')){if(!vis(b))continue;` +
-    `if((b.innerText||b.value||'').trim().toLowerCase()===${JSON.stringify(text)}){b.click();return true}}return false})()`;
+    `for(const b of pierce('button,input[type=submit],[role=button],a,[data-value]')){if(!vis(b))continue;` +
+    `if((b.innerText||b.value||'').trim().toLowerCase().replace(/[\u2018\u2019]/g,"'")===${JSON.stringify(text)}){b.click();return true}}return false})()`;
 }
 
 export async function readState(send: Send, buttons: string[]): Promise<PageState | null> {
@@ -96,10 +107,22 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
   const seen = new Map<string, number>();
   let passwordTyped = 0, usernameTyped = 0, codeTyped = 0;
   let lastOrigin = "";
+  let stateErrors = 0;
+  let otherWay = 0;
+  const errSeen = new Set<string>();
   while (d.now() < deadline) {
     if (d.finished()) return { ok: true };
     let s: PageState | null = null;
-    try { s = await d.state(); } catch { s = null; }
+    try { s = await d.state(); } catch (e) {
+      // CDP errors carry no page content; log each distinct one once so a broken
+      // connection is visible instead of a silent spin until the timeout.
+      const m = String((e as Error)?.message ?? e).slice(0, 200);
+      if (!errSeen.has(m)) { errSeen.add(m); d.log?.(`cannot read the page: ${m}`); }
+      if (++stateErrors >= MAX_STATE_ERRORS) return { ok: false, reason: "page_unreadable", origin: lastOrigin || undefined };
+      await d.sleep(500);
+      continue;
+    }
+    stateErrors = 0;
     if (!s) { await d.sleep(500); continue; }
     lastOrigin = s.origin;
     const onSignin = s.origin === o.signinOrigin;
@@ -107,7 +130,25 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
     const key = `${s.origin}|${s.kind}|${s.button ?? ""}`;
     const n = (seen.get(key) ?? 0) + 1;
     seen.set(key, n);
-    if (n > 12) return { ok: false, reason: `stuck_on_${s.kind}`, origin: s.origin };
+    // A push approval is waited out to the overall timeout: a person approves it on their phone.
+    if (n > 12 && s.kind !== "push") return { ok: false, reason: `stuck_on_${s.kind}`, origin: s.origin };
+    if (s.kind === "push" && onSignin && o.hasTotp && otherWay < OTHER_WAY_LINKS.length) {
+      // Prefer a code we can type over a phone tap: walk the "sign in another way" links.
+      for (; otherWay < OTHER_WAY_LINKS.length; otherWay++) {
+        if (await d.click(OTHER_WAY_LINKS[otherWay]!)) { d.log?.(`chose: ${OTHER_WAY_LINKS[otherWay]}`); await d.sleep(1200); }
+      }
+      continue;
+    }
+    if (s.kind === "push" && onSignin) {
+      const said = `push:${s.number ?? ""}`;
+      if (!errSeen.has(said)) {
+        errSeen.add(said);
+        d.log?.(`waiting for approval in the account's authenticator app${s.number ? `: enter ${s.number}` : ""}`);
+        d.onPush?.(s.number);
+      }
+      await d.sleep(1500);
+      continue;
+    }
 
     if (s.kind === "approved" && onApprove) {
       // The CLI polls the token endpoint; give it a moment to notice.
@@ -166,4 +207,19 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
 
 async function pressFirst(d: DriverDeps, texts: string[]): Promise<void> {
   for (const t of texts) if (await d.click(t)) return;
+}
+
+/**
+ * What an unrecognized page shows, for the log: title, headings and button
+ * captions only. Never an input's value.
+ */
+export const DESCRIBE_EXPR = `(()=>{const all=${ALL_FN};const t=(e)=>(e.innerText||'').trim().replace(/\\s+/g,' ').slice(0,80);` +
+  `return JSON.stringify({title:document.title,path:location.pathname.slice(0,40),` +
+  `heads:all('h1,h2,[role=heading],#loginHeader,.text-title,[data-testid=title]').map(t).filter(Boolean).slice(0,4),` +
+  `text:all('#idDiv_SAOTCAS_Description,#idRichContext_DisplaySign,.text-body,[role=alert]').map(t).filter(Boolean).slice(0,3),` +
+  `buttons:all('button,input[type=submit],input[type=button],[role=button]').map(b=>(b.innerText||(b.type!=='text'&&b.type!=='password'?b.value:'')||'').trim().slice(0,40)).filter(Boolean).slice(0,10)})})()`;
+
+export async function describePage(send: Send): Promise<string> {
+  const r = await send<{ result: { value?: string } }>("Runtime.evaluate", { expression: DESCRIBE_EXPR, returnByValue: true });
+  return r.result.value ?? "";
 }

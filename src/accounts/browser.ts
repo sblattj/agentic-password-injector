@@ -61,3 +61,20 @@ export async function openTab(base: string, url: string): Promise<string> {
   if (!r.ok) throw new Error(`could not open a tab (${r.status})`);
   return ((await r.json()) as { id: string }).id;
 }
+
+/**
+ * Wait until the new tab has left its first navigation: a CDP attach while the
+ * initial load is still in flight wedges the page (every Runtime.evaluate then
+ * times out, seen on a headless Vivaldi). Read from /json/list only, no attach.
+ * Waits for a titled https page, then settles a moment; gives up quietly at the bound.
+ */
+export async function waitForFirstLoad(base: string, id: string, timeoutMs = 20_000, settleMs = 1500): Promise<void> {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const list = (await fetch(`${base}/json/list`).then((r) => r.json()).catch(() => [])) as { id: string; url: string; title: string }[];
+    const t = list.find((x) => x.id === id);
+    if (t && t.url.startsWith("https://") && t.title && t.title !== t.url) break;
+    await Bun.sleep(250);
+  }
+  await Bun.sleep(settleMs);
+}

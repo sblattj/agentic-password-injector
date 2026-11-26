@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one, so a keychain call under that HOME no longer pops macOS's "Keychain Not
   Found ... Reset To Defaults" dialog. A pinned account needs no saved
   credential (`add --pinned` no longer defaults one).
+- `apinj-accounts login` waits for the tab's first load before reading it (an
+  early CDP attach wedged headless pages), reports unreadable pages instead of
+  spinning, logs a value-free description of a page it stops on, waits out an
+  authenticator-app push (logging the number to match), and with a stored TOTP
+  seed picks "use a verification code" instead.
 
 ### Added
 
