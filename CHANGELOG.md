@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `apinj-accounts login` waits on an authenticator push or number-match page
+  for the person to approve it, instead of clicking away to "use a
+  verification code" at once (the push had already reached the phone). A
+  stored TOTP seed is the fallback after `APINJ_PUSH_WAIT_S` seconds (default
+  90; `0` keeps the old code-at-once behaviour). The number to match is logged
+  as `number to match: NN`, and `APINJ_ON_NUMBER` runs a command with it
+  appended (no shell) so a sign-in helper can show it the moment it appears.
+
 ### Fixed
 
 - A fill into a background tab (`document.visibilityState` hidden) no longer
@@ -25,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   early CDP attach wedged headless pages), reports unreadable pages instead of
   spinning, logs a value-free description of a page it stops on, waits out an
   authenticator-app push (logging the number to match), and with a stored TOTP
-  seed picks "use a verification code" instead.
+  seed falls back to "use a verification code" (after the push wait, above).
 - `apinj-accounts login` walks a passkey ("face, fingerprint, PIN or security
   key") page to a verification code through "sign in another way" when a TOTP
   seed is stored (it stops as `passkey_required` without one), and only clicks

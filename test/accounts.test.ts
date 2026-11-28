@@ -4,8 +4,8 @@ import { tmpdir, homedir } from "node:os";
 import { join } from "node:path";
 import { ConfigError, linkKeychains, load, pick, save, toggleTarget, validate, type Registry } from "../src/accounts/config.ts";
 import { loginArgs, parseDeviceFlow, parseUsage, parseWhoami } from "../src/accounts/kiro.ts";
-import { drive, pickExpr, stateExpr, type DriverDeps, type PageState } from "../src/accounts/drive.ts";
-import { homeConflict, loginAccount } from "../src/accounts/login.ts";
+import { PUSH_WAIT_MS, drive, pickExpr, stateExpr, type DriverDeps, type PageState } from "../src/accounts/drive.ts";
+import { homeConflict, loginAccount, pushWaitMs, reportNumber } from "../src/accounts/login.ts";
 import { bestOf } from "../src/accounts/cli.ts";
 
 // ── parsers, against the real kiro-cli 3.5.0 output shapes ──────────────────
@@ -256,23 +256,65 @@ test("drive: an authenticator push is waited out (not stuck) and its number repo
   expect(logs.filter((l) => l.includes("authenticator"))).toEqual(["waiting for approval in the account's authenticator app: enter 99"]);
 });
 
-test("drive: with a stored seed, a push prompt is swapped for a typed code", async () => {
-  const calls: string[] = [];
-  let stage = 0, done = false;
+function seedPushPage(approveAfterReads = Infinity) {
+  const calls: string[] = []; const logs: string[] = [];
+  let stage = 0, done = false, t = 0, reads = 0;
   const d: DriverDeps = {
-    state: async () => [
-      { origin: SIGNIN, kind: "push", number: "99" } as PageState,
-      { origin: SIGNIN, kind: "otp" } as PageState,
-      { origin: APPROVE, kind: "button", button: "allow access" } as PageState,
-    ][stage]!,
+    state: async () => {
+      if (stage === 0 && ++reads > approveAfterReads) stage = 2; // the person approved on their phone
+      return [
+        { origin: SIGNIN, kind: "push", number: "99" } as PageState,
+        { origin: SIGNIN, kind: "otp" } as PageState,
+        { origin: APPROVE, kind: "button", button: "allow access" } as PageState,
+      ][stage]!;
+    },
     fill: async () => ({ filled: true }),
     totp: async () => { calls.push("totp"); stage = 2; return { filled: true }; },
-    click: async (t) => { calls.push(`click:${t}`); if (t === "use a verification code") stage = 1; if (t === "allow access") done = true; return true; },
-    sleep: async () => {}, now: () => 0, finished: () => done,
+    click: async (x) => { calls.push(`click:${x}`); if (x === "use a verification code") stage = 1; if (x === "allow access") done = true; return true; },
+    sleep: async (ms) => { t += ms; }, now: () => t, finished: () => done, log: (l) => logs.push(l),
   };
-  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 1, hasTotp: true });
+  return { d, calls, logs, elapsed: () => t };
+}
+
+test("drive: with a stored seed, a push page is waited on first, then swapped for a typed code", async () => {
+  const { d, calls, logs, elapsed } = seedPushPage();
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 600_000, hasTotp: true, pushWaitMs: 30_000 });
   expect(r).toEqual({ ok: true });
   expect(calls.slice(0, 2)).toEqual(["click:use a verification code", "totp"]);
+  expect(elapsed()).toBeGreaterThanOrEqual(30_000); // never clicked away before the wait
+  expect(logs).toContain("no approval after 30s: using the verification code instead");
+});
+
+test("drive: a push approved within the wait never touches the TOTP seed or the other-way links", async () => {
+  const { d, calls } = seedPushPage(5);
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 600_000, hasTotp: true, pushWaitMs: 30_000 });
+  expect(r).toEqual({ ok: true });
+  expect(calls).toEqual(["click:allow access"]);
+});
+
+test("drive: pushWaitMs 0 keeps the old behaviour (code at once)", async () => {
+  const { d, calls, elapsed } = seedPushPage();
+  const r = await drive(d, { signinOrigin: SIGNIN, approveOrigins: [APPROVE], timeoutMs: 600_000, hasTotp: true, pushWaitMs: 0 });
+  expect(r).toEqual({ ok: true });
+  expect(calls[0]).toBe("click:use a verification code");
+  expect(elapsed()).toBeLessThan(10_000); // only the post-click sleeps, no 90s wait
+});
+
+test("pushWaitMs: APINJ_PUSH_WAIT_S parsed, bad values fall back to the default", () => {
+  expect(pushWaitMs({})).toBe(PUSH_WAIT_MS);
+  expect(pushWaitMs({ APINJ_PUSH_WAIT_S: "45" })).toBe(45_000);
+  expect(pushWaitMs({ APINJ_PUSH_WAIT_S: "0" })).toBe(0);
+  for (const bad of ["", "-1", "x", "1.5", "9999"]) expect(pushWaitMs({ APINJ_PUSH_WAIT_S: bad })).toBe(PUSH_WAIT_MS);
+});
+
+test("reportNumber: logs the number and runs APINJ_ON_NUMBER with it appended, no shell", () => {
+  const logs: string[] = []; const ran: [string, string[]][] = [];
+  reportNumber("47", (l) => logs.push(l), { APINJ_ON_NUMBER: "fleet auth number" }, (c, a) => ran.push([c, a]));
+  expect(logs).toEqual(["number to match: 47"]);
+  expect(ran).toEqual([["fleet", ["auth", "number", "47"]]]);
+  reportNumber("47", () => {}, {}, (c, a) => ran.push([c, a]));
+  reportNumber("4;rm", () => {}, { APINJ_ON_NUMBER: "x" }, (c, a) => ran.push([c, a]));
+  expect(ran.length).toBe(1); // no hook set, or not a number: nothing runs
 });
 
 test("drive: a passkey page on an alt origin is walked to a verification code; nothing typed there", async () => {

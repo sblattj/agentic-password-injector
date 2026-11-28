@@ -5,7 +5,7 @@ import { fillCredential, fillTotp, REAL_DEPS, type Deps } from "../tools.ts";
 import { keychainHasTotp, keychainLookup } from "../vault/keychain.ts";
 import type { FillResult } from "../gated.ts";
 import { homeOf, linkKeychains, type Account, type Registry } from "./config.ts";
-import { APPROVE_BUTTONS, SIGNIN_BUTTONS, clickButton, describePage, pickAccount, drive, readState, type DriveResult, type PageState } from "./drive.ts";
+import { APPROVE_BUTTONS, PUSH_WAIT_MS, SIGNIN_BUTTONS, clickButton, describePage, pickAccount, drive, readState, type DriveResult, type PageState } from "./drive.ts";
 import { launchAccountBrowser, openTab, waitForFirstLoad } from "./browser.ts";
 import { startDeviceLogin, whoami, type Runner, realRunner } from "./kiro.ts";
 import { spawnSync } from "node:child_process";
@@ -94,7 +94,8 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
       now: () => Date.now(),
       finished: () => exited !== undefined,
       log: o.log,
-    }, { signinOrigin: new URL(l.signinOrigin).origin, signinAltOrigins: (l.signinAltOrigins ?? []).map((u) => new URL(u).origin), approveOrigins, timeoutMs: timeoutS * 1000, hasTotp: keychainHasTotp(l.credential), expectUser: expect });
+      onPush: (n) => { if (n) reportNumber(n, o.log); },
+    }, { signinOrigin: new URL(l.signinOrigin).origin, signinAltOrigins: (l.signinAltOrigins ?? []).map((u) => new URL(u).origin), approveOrigins, timeoutMs: timeoutS * 1000, pushWaitMs: pushWaitMs(), hasTotp: keychainHasTotp(l.credential), expectUser: expect });
 
     if (!res.ok && res.reason.startsWith("stuck_on_")) {
       const seen = await onTab(describePage).catch(() => "");
@@ -116,6 +117,26 @@ export async function loginAccount(r: Registry, name: string, o: LoginOptions): 
     return { ok: false, reason: "wrong_identity (logged this HOME back out)" };
   }
   return { ok: true, email: after.email };
+}
+
+/** APINJ_PUSH_WAIT_S: seconds a push page is waited on before a stored TOTP seed is used (default 90, 0 to 3600). */
+export function pushWaitMs(env: Record<string, string | undefined> = process.env): number {
+  const v = Number(env.APINJ_PUSH_WAIT_S);
+  return env.APINJ_PUSH_WAIT_S !== undefined && env.APINJ_PUSH_WAIT_S !== "" && Number.isInteger(v) && v >= 0 && v <= 3600 ? v * 1000 : PUSH_WAIT_MS;
+}
+
+/**
+ * The number to match is not a secret: the person must read it to approve the push. It is
+ * logged as a stable `number to match: NN` line, and when APINJ_ON_NUMBER names a command
+ * (split on spaces, no shell) that command runs with the number appended, so a sign-in desk
+ * can show it big the moment it appears.
+ */
+export function reportNumber(n: string, log: (s: string) => void, env: Record<string, string | undefined> = process.env,
+  spawn: (cmd: string, args: string[]) => void = (cmd, args) => { try { Bun.spawn([cmd, ...args], { stdout: "ignore", stderr: "ignore" }); } catch (e) { log(`APINJ_ON_NUMBER failed: ${String((e as Error)?.message ?? e).slice(0, 120)}`); } }) {
+  if (!/^\d{1,4}$/.test(n)) return;
+  log(`number to match: ${n}`);
+  const parts = (env.APINJ_ON_NUMBER ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length) spawn(parts[0]!, [...parts.slice(1), n]);
 }
 
 function homeOfPath(p: string) { return homeOf({ tool: "kiro", home: p }); }

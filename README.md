@@ -343,11 +343,16 @@ How it stays safe:
   (0600) holds names, HOME paths, the IdP settings and the *name* of each
   Keychain entry. The manager reads only the entry's attributes (the username,
   to check the identity after login).
-- **MFA by code, never by guess.** With a TOTP seed stored as
-  `apinj-totp:<entry>`, `login` swaps an authenticator push or a passkey page
-  for "use a verification code" and types the code through the injector's
-  gated fill. Without a seed it waits out a push (logging the number to match)
-  and stops on a passkey page. Extra IdP origins (`login.signinAltOrigins`, for
+- **MFA: the push first, the code as the fallback.** A push (or number-match)
+  page already reached the phone when it loaded, so `login` waits on it for the
+  person to approve, logging a stable `number to match: NN` line. With a TOTP
+  seed stored as `apinj-totp:<entry>`, only after `APINJ_PUSH_WAIT_S` seconds
+  (default 90; 0 restores code-at-once) does it pick "use a verification code"
+  and type the code through the injector's gated fill. Without a seed it waits
+  the whole timeout. `APINJ_ON_NUMBER` names a command (split on spaces, no
+  shell) that runs with the number appended the moment it shows, so a sign-in
+  helper can display it big. A passkey page is walked to a code at once, and
+  without a seed the run stops there. Extra IdP origins (`login.signinAltOrigins`, for
   example the IdP's passkey host) only get allowlisted link clicks, never typing.
 - **Every keystroke goes through the gate.** `login` calls the same
   `fillCredential` / `fillTotp` the MCP tools use (`makeFillers`,

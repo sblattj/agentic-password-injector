@@ -53,6 +53,13 @@ export interface DriveOptions {
   timeoutMs: number;
   hasTotp: boolean;
   /**
+   * How long a push (or number-match) page is waited on for the person to approve it
+   * before a stored TOTP seed is used instead (default PUSH_WAIT_MS). The push already
+   * went to their phone when that page loaded, so walking away from it at once only
+   * leaves an unanswered prompt behind. Passkey pages are still walked at once.
+   */
+  pushWaitMs?: number;
+  /**
    * The account this run must sign in as (the credential's username). With it, an
    * account picker is answered with exactly that tile, and an IdP page that shows a
    * different identity stops the run instead of signing the wrong account in.
@@ -72,6 +79,8 @@ export const MAX_STATE_ERRORS = 40;
  */
 export const OTHER_WAY_LINKS = ["use a verification code", "i can't use my microsoft authenticator app right now", "sign in another way", "other ways to sign in"];
 const MAX_WALK = 6;
+/** Default wait on a push page before falling back to a stored TOTP seed. */
+export const PUSH_WAIT_MS = 90_000;
 
 export const SIGNIN_BUTTONS = ["next", "sign in", "yes", "verify", "continue"];
 export const APPROVE_BUTTONS = ["confirm and continue", "allow access", "allow", "continue"];
@@ -149,6 +158,8 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
   let lastOrigin = "";
   let stateErrors = 0;
   let walking = false, codeChosen = false, walkClicks = 0, reopened = 0;
+  let pushSince: number | undefined, pushFellBack = false;
+  const pushWait = o.pushWaitMs ?? PUSH_WAIT_MS;
   const errSeen = new Set<string>();
   while (d.now() < deadline) {
     if (d.finished()) return { ok: true };
@@ -187,7 +198,11 @@ export async function drive(d: DriverDeps, o: DriveOptions): Promise<DriveResult
       await d.sleep(1500);
       continue;
     }
-    const wantsOtherWay = s.kind === "push" || s.kind === "passkey" || (walking && (s.kind === "unknown" || s.kind === "button"));
+    if (s.kind === "push" && onFamily && pushSince === undefined) pushSince = d.now();
+    // A push is answered on the phone first; only after pushWait does a stored seed take over.
+    const pushTimedOut = s.kind === "push" && pushSince !== undefined && d.now() - pushSince >= pushWait;
+    if (pushTimedOut && o.hasTotp && !pushFellBack) { pushFellBack = true; d.log?.(`no approval after ${Math.round(pushWait / 1000)}s: using the verification code instead`); }
+    const wantsOtherWay = pushTimedOut || s.kind === "passkey" || (walking && (s.kind === "unknown" || s.kind === "button"));
     if (onFamily && o.hasTotp && wantsOtherWay && walkClicks < MAX_WALK && !codeChosen) {
       // Prefer a code we can type over a phone tap or a passkey: walk the "another way" links.
       walking = true;
